@@ -64,6 +64,16 @@ void adapter::NavThroughNodes::extendNavigationCallback(
     return;
   }
 
+  std::string validation_message;
+  if (!validateNavigationExtension(request->edges, request->nodes, validation_message))
+  {
+    response->success = false;
+    response->message = validation_message.empty() ?
+      "Navigation extension rejected by handler" : validation_message;
+    RCLCPP_WARN(node_->get_logger(), "NavThroughNodes: %s", response->message.c_str());
+    return;
+  }
+
   size_t old_edge_count = 0;
   {
     std::unique_lock lock(navigation_mutex_);

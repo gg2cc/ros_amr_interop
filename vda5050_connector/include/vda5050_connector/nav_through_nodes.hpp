@@ -131,6 +131,20 @@ public:
 
 protected:
   /**
+   * @brief Validate an in-flight navigation extension before mutating the goal.
+   *
+   * 返回 false 时，续航请求会被拒绝且当前目标保持不变。默认实现保留
+   * 原有 connector 的追加行为，具体导航适配器可按底层能力覆盖此钩子。
+   */
+  virtual bool validateNavigationExtension(
+    const std::vector<vda5050_msgs::msg::Edge> & /*edges*/,
+    const std::vector<vda5050_msgs::msg::Node> & /*nodes*/,
+    std::string & /*message*/)
+  {
+    return true;
+  }
+
+  /**
    * @brief Set up the ExtendNavigation service server.
    * Call from configure() after node_ and robot_name_ are available.
    * Builds the service name from namespace, manufacturer_name param, and robot_name_.
