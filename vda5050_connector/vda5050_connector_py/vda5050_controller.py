@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 # BSD 3-Clause License
 #
 # Copyright (c) 2022 InOrbit, Inc.
