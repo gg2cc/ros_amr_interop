@@ -1,4 +1,4 @@
-ARG ROS_DISTRO="humble"
+ARG ROS_DISTRO="foxy"
 
 FROM ros:$ROS_DISTRO AS base
 

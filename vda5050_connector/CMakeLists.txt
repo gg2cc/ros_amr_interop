@@ -59,8 +59,7 @@ ament_target_dependencies(${library_adapter}
   ${msg_dependencies}
   tf2
 )
-rosidl_get_typesupport_target(cpp_typesupport_target "${PROJECT_NAME}" "rosidl_typesupport_cpp")
-target_link_libraries(${library_adapter} "${cpp_typesupport_target}")
+rosidl_target_interfaces(${library_adapter} ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 # Causes the visibility macros to use dllexport rather than dllimport,
 # which is appropriate when building the dll but not consuming it.

@@ -51,13 +51,13 @@ docker run -ti --rm \
     -v ./vda5050_msgs:/dev_ws/src/vda5050_msgs \
     -v ./vda5050_serializer:/dev_ws/src/vda5050_serializer \
     -v ./vda5050_connector:/dev_ws/src/vda5050_connector \
-    osrf/ros:humble-desktop-full
+    osrf/ros:foxy-desktop-full
 ```
 
 Now build the package:
 
 ```bash
-apt update && apt install ros-humble-ament* -y
+apt update && apt install ros-foxy-ament* -y
 cd /dev_ws/
 colcon build --symlink-install
 ```
