@@ -752,6 +752,38 @@ def test_vda5050_controller_node_stitch_order(
     assert node._current_state.last_node_sequence_id == 4
 
 
+def test_vda5050_controller_zero_based_stitch_order(
+    mocker,
+    adapter_node,
+    action_server_nav_to_node,
+    action_server_process_vda_action,
+    service_get_state,
+    service_supported_actions,
+):
+    """Zero-based updates are rebased before stitch validation."""
+    node = VDA5050Controller()
+    node.logger.set_level(LoggingSeverity.DEBUG)
+
+    [base_order, stitch_order] = get_stitch_orders()
+    stitch_order.nodes[0].sequence_id = 0
+    stitch_order.nodes[1].sequence_id = 2
+    stitch_order.edges[0].sequence_id = 1
+
+    node.process_order(base_order)
+
+    future = Future()
+    future.set_result(result=NavigateToNode.Result())
+    node._navigate_to_node_result_callback(future)
+
+    node.process_order(stitch_order)
+
+    assert stitch_order.nodes[0].sequence_id == 2
+    assert stitch_order.nodes[1].sequence_id == 4
+    assert stitch_order.edges[0].sequence_id == 3
+    assert node._current_order.nodes[-1].node_id == "node3"
+    assert node._current_order.nodes[-1].sequence_id == 4
+
+
 def test_vda5050_controller_node_reject_order(
     mocker,
     adapter_node,

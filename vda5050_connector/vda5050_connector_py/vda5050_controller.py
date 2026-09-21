@@ -1012,6 +1012,7 @@ class VDA5050Controller(Node):
                 accept_mode = OrderAcceptModes.NEW
         else:
             # Same order graph (Same order_id)
+            self._normalize_stitch_sequence_ids(order)
             update_id_diff = order.order_update_id - self._current_order.order_update_id
             match_last_new_base_nodes = self._match_stitch_nodes(order)
 
@@ -1043,6 +1044,51 @@ class VDA5050Controller(Node):
                                description=error_description)
         else:
             self._accept_order(order=order, mode=accept_mode)
+
+    def _normalize_stitch_sequence_ids(self, order: VDAOrder):
+        """
+        兼容调度器在每次订单更新中都从零开始编号的非标准序列。
+
+        MQTT 桥接器会把非标准订单转换为节点 ``0, 2, ...``、边 ``1, 3, ...``。
+        对于 stitch 更新，首节点实际上必须继续使用旧订单末节点的全局序号；
+        因此这里只在首节点 ID 相同且新序列确实从零开始时整体平移，标准订单
+        仍然交给后续严格的 stitch 校验处理。
+        """
+        base_order_nodes = [
+            node for node in self._current_order.nodes if node.released
+        ]
+        if not base_order_nodes or not order.nodes:
+            return
+
+        last_node = base_order_nodes[-1]
+        stitch_node = order.nodes[0]
+        if last_node.node_id != stitch_node.node_id or stitch_node.sequence_id != 0:
+            return
+
+        has_standard_node_sequence = all(
+            node.sequence_id == index * 2
+            for index, node in enumerate(order.nodes)
+        )
+        has_standard_edge_sequence = all(
+            edge.sequence_id == index * 2 + 1
+            for index, edge in enumerate(order.edges)
+        )
+        if not has_standard_node_sequence or not has_standard_edge_sequence:
+            return
+
+        sequence_offset = last_node.sequence_id
+        if sequence_offset == 0:
+            return
+
+        for node in order.nodes:
+            node.sequence_id += sequence_offset
+        for edge in order.edges:
+            edge.sequence_id += sequence_offset
+
+        self.logger.warn(
+            "Adjusted stitch order sequence IDs by offset "
+            f"{sequence_offset} for a zero-based order update."
+        )
 
     def order_msg_is_valid(self, order: VDAOrder):
         """
