@@ -106,7 +106,8 @@ def read_str_array_parameter(node: Node, param_name: str, alternative: list) -> 
     """Declare and read a string array parameter."""
     node.declare_parameter(
         param_name,
-        descriptor=ParameterDescriptor(type=ParameterType.PARAMETER_STRING_ARRAY),
+        descriptor=ParameterDescriptor(
+            type=ParameterType.PARAMETER_STRING_ARRAY),
         value=alternative,
     )
     param = node.get_parameter(param_name)
@@ -198,6 +199,10 @@ def json_snake_to_camel_case(s):
             if new_key != key:
                 obj[new_key] = obj[key]
                 del obj[key]
+            # ROS vda5050_msgs 使用复数 informations，而 VDA5050 JSON schema
+            # 的标准字段名是单数 information；仅在 MQTT JSON 输出阶段转换名称。
+            if "informations" in obj:
+                obj["information"] = obj.pop("informations")
         # referenceKey value must be camelCase per VDA5050 standard,
         # but is stored as snake_case in the ROS2 message
         if "referenceKey" in obj:

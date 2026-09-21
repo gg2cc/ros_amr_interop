@@ -114,6 +114,13 @@ DEFAULT_STATE_PUB_PERIOD = 5.0  # sec
 DEFAULT_CONNECTION_PUB_PERIOD = 15.0  # sec
 DEFAULT_VISUALIZATION_PUB_PERIOD = 1.0  # sec
 DEFAULT_EXECUTE_ORDER_PERIOD = 0.1  # sec
+VALID_OPERATING_MODES = {
+    VDAOrderState.AUTOMATIC,
+    VDAOrderState.SEMIAUTOMATIC,
+    VDAOrderState.MANUAL,
+    VDAOrderState.SERVICE,
+    VDAOrderState.TEACHIN,
+}
 
 
 class ActionErrors(Enum):
@@ -149,7 +156,8 @@ class VDA5050Controller(Node):
         self.logger = self.get_logger()
         self.on_configure()
 
-        self.logger.info("Node {} has started successfully.".format(DEFAULT_NODE_NAME))
+        self.logger.info(
+            "Node {} has started successfully.".format(DEFAULT_NODE_NAME))
 
     # Configure
 
@@ -169,7 +177,8 @@ class VDA5050Controller(Node):
             serial_number=self._serial_number,
             last_node_id=self._starting_node_id,
             operating_mode=VDAOrderState.AUTOMATIC,
-            safety_state=VDASafetyState(e_stop=VDASafetyState.NONE, field_violation=False),
+            safety_state=VDASafetyState(
+                e_stop=VDASafetyState.NONE, field_violation=False),
         )
         self._current_connection = VDAConnection(
             header_id=0,
@@ -202,13 +211,15 @@ class VDA5050Controller(Node):
     def _read_parameters(self):
         """Read and load ROS parameters."""
         # Robot information
-        self._robot_name = read_str_parameter(self, "robot_name", DEFAULT_ROBOT_NAME)
+        self._robot_name = read_str_parameter(
+            self, "robot_name", DEFAULT_ROBOT_NAME)
         self._starting_node_id = read_str_parameter(self, "starting_node_id",
                                                     DEFAULT_STARTING_NODE_ID)
         self._manufacturer_name = read_str_parameter(
             self, "manufacturer_name", DEFAULT_MANUFACTURER_NAME
         )
-        self._serial_number = read_str_parameter(self, "serial_number", DEFAULT_SERIAL_NUMBER)
+        self._serial_number = read_str_parameter(
+            self, "serial_number", DEFAULT_SERIAL_NUMBER)
         self._protocol_version = read_str_parameter(
             self, "protocol_version", DEFAULT_PROTOCOL_VERSION
         )
@@ -243,8 +254,8 @@ class VDA5050Controller(Node):
         self._execute_order_period = read_double_parameter(
             self, "execute_order_period", DEFAULT_EXECUTE_ORDER_PERIOD
         )
-        self._interface_name = read_str_parameter(self, "interface_name", DEFAULT_INTERFACE_NAME)
-
+        self._interface_name = read_str_parameter(
+            self, "interface_name", DEFAULT_INTERFACE_NAME)
 
     # ---- Configure ROS interfaces ----
 
@@ -305,7 +316,8 @@ class VDA5050Controller(Node):
             callback_group=MutuallyExclusiveCallbackGroup(),
         )
         while not self._get_adapter_state_svc_cli.wait_for_service(timeout_sec=1.0):
-            self.logger.error("GetState adapter service not available, waiting again...")
+            self.logger.error(
+                "GetState adapter service not available, waiting again...")
 
         # Service client to request SupportedActions from the adapter
         self._supported_actions_svc_cli = self.create_client(
@@ -314,7 +326,8 @@ class VDA5050Controller(Node):
             callback_group=MutuallyExclusiveCallbackGroup(),
         )
         while not self._supported_actions_svc_cli.wait_for_service(timeout_sec=1.0):
-            self.logger.error("SupportedActions adapter service not available, waiting again...")
+            self.logger.error(
+                "SupportedActions adapter service not available, waiting again...")
 
         # Service client to extend an in-flight navigation goal (nav_through_nodes only)
         if self._enable_nav_through_nodes:
@@ -430,6 +443,14 @@ class VDA5050Controller(Node):
 
     def _publish_state(self):
         """Publish the current OrderState msg."""
+        # adapter 只负责提供机器人相关状态，不能覆盖 VDA5050 controller 管理的
+        # 消息身份和运行模式；发布前再次归一化，避免旧插件或错误参数产生非法 JSON。
+        self._current_state.version = self._protocol_version
+        self._current_state.manufacturer = self._manufacturer_name
+        self._current_state.serial_number = self._serial_number
+        if self._current_state.operating_mode not in VALID_OPERATING_MODES:
+            self._current_state.operating_mode = VDAOrderState.AUTOMATIC
+
         self.logger.debug(f"Publishing state message {self._current_state}")
         self._current_state.header_id += 1
         self._current_state.timestamp = get_vda5050_ts()
@@ -437,7 +458,8 @@ class VDA5050Controller(Node):
 
     def _publish_connection(self):
         """Publish the current Connection msg."""
-        self.logger.debug(f"Publishing connection message {self._current_connection}")
+        self.logger.debug(
+            f"Publishing connection message {self._current_connection}")
         self._current_connection.header_id += 1
         self._current_connection.timestamp = get_vda5050_ts()
         self._current_connection.connection_state = VDAConnection.ONLINE
@@ -546,8 +568,10 @@ class VDA5050Controller(Node):
 
         # Get actions from nodes and edges
         # ``itertools.chain`` is used for flattening
-        node_actions = list(itertools.chain(*[node.actions for node in base_order_nodes]))
-        edge_actions = list(itertools.chain(*[edge.actions for edge in base_order_edges]))
+        node_actions = list(itertools.chain(
+            *[node.actions for node in base_order_nodes]))
+        edge_actions = list(itertools.chain(
+            *[edge.actions for edge in base_order_edges]))
 
         return [
             VDACurrentAction(
@@ -632,12 +656,14 @@ class VDA5050Controller(Node):
                 ),
                 error_level=VDAError.WARNING,
                 error_references=[
-                    VDAErrorReference(reference_key="action_id", reference_value=action_id)
+                    VDAErrorReference(reference_key="action_id",
+                                      reference_value=action_id)
                 ],
             )
             # Generate error and publish it, then delete it
             current_errors = self._current_state.errors
-            self._update_state({"errors": current_errors + [error]}, publish_now=True)
+            self._update_state(
+                {"errors": current_errors + [error]}, publish_now=True)
             self._update_state({"errors": current_errors})
             return
 
@@ -661,9 +687,11 @@ class VDA5050Controller(Node):
 
         """
         if async_call:
-            future = self._get_adapter_state_svc_cli.call_async(GetState.Request())
+            future = self._get_adapter_state_svc_cli.call_async(
+                GetState.Request())
             future.add_done_callback(
-                functools.partial(self._get_state_from_adapter_callback, action)
+                functools.partial(
+                    self._get_state_from_adapter_callback, action)
             )
             return
 
@@ -681,7 +709,8 @@ class VDA5050Controller(Node):
 
         """
         if action:
-            self._update_action_status(action.action_id, VDACurrentAction.FINISHED, action.result_description)
+            self._update_action_status(
+                action.action_id, VDACurrentAction.FINISHED, action.result_description)
         self._update_state_from_adapter(future.result())
         self._publish_state()
 
@@ -716,7 +745,11 @@ class VDA5050Controller(Node):
                 "battery_state": order_state.state.battery_state,
                 "errors": current_errors + order_state.state.errors,
                 "informations": order_state.state.informations,
+                # adapter 的空字符串不是合法 VDA5050 operatingMode，保留 controller
+                # 当前值；如果当前值也非法，则由 _publish_state() 统一回退到 AUTOMATIC。
                 "operating_mode": order_state.state.operating_mode
+                if order_state.state.operating_mode in VALID_OPERATING_MODES
+                else self._current_state.operating_mode
             }
         )
 
@@ -738,12 +771,14 @@ class VDA5050Controller(Node):
         if not msg_is_valid:
             # Generate error and publish it, then delete it
             current_errors = self._current_state.errors
-            self._update_state({"errors": current_errors + [error]}, publish_now=True)
+            self._update_state(
+                {"errors": current_errors + [error]}, publish_now=True)
             self._update_state({"errors": current_errors})
             return
 
         header_id = instant_actions.header_id
-        self.logger.info(f"Received instant_actions msg with id: '{header_id}'")
+        self.logger.info(
+            f"Received instant_actions msg with id: '{header_id}'")
 
         for action in instant_actions.actions:
             self.logger.info(
@@ -759,20 +794,23 @@ class VDA5050Controller(Node):
             )
             self._instant_action_ids.add(action.action_id)
             self._update_state(
-                {"action_states": self._current_state.action_states + [action_state]}
+                {"action_states": self._current_state.action_states +
+                    [action_state]}
             )
 
             if action.action_type == "cancelOrder":
                 self._cancel_action = action
                 continue
             elif action.action_type == "stateRequest":
-                self._update_action_status(action.action_id, VDACurrentAction.RUNNING)
+                self._update_action_status(
+                    action.action_id, VDACurrentAction.RUNNING)
                 self.get_state_from_adapter(async_call=True, action=action)
                 continue
             elif action.action_type == "factsheetRequest":
                 # Populate the current factsheet msg reading and requesting its info
                 self._populate_factsheet()
-                self._update_action_status(action.action_id, VDACurrentAction.FINISHED)
+                self._update_action_status(
+                    action.action_id, VDACurrentAction.FINISHED)
                 self._publish_factsheet()
                 continue
 
@@ -824,10 +862,12 @@ class VDA5050Controller(Node):
             goal=goal_msg, feedback_callback=self._process_vda_action_feedback_callback
         )
 
-        self._update_action_status(action.action_id, VDACurrentAction.INITIALIZING)
+        self._update_action_status(
+            action.action_id, VDACurrentAction.INITIALIZING)
         # Register callback to be executed when the goal is accepted
         self._process_vda_action_goal_future.add_done_callback(
-            functools.partial(self._process_vda_action_goal_response_callback, action)
+            functools.partial(
+                self._process_vda_action_goal_response_callback, action)
         )
 
     def _process_vda_action_goal_response_callback(self, action: VDAAction, future: Future):
@@ -858,7 +898,8 @@ class VDA5050Controller(Node):
         )
 
         get_result_future = goal_handle.get_result_async()
-        get_result_future.add_done_callback(self._process_vda_action_result_callback)
+        get_result_future.add_done_callback(
+            self._process_vda_action_result_callback)
 
     def _process_vda_action_feedback_callback(self, feedback_msg: ProcessVDAAction.Feedback):
         """
@@ -871,7 +912,8 @@ class VDA5050Controller(Node):
 
         """
         current_action = feedback_msg.feedback.current_action
-        self._update_action_status(current_action.action_id, current_action.action_status)
+        self._update_action_status(
+            current_action.action_id, current_action.action_status)
 
     def _process_vda_action_result_callback(self, future: Future):
         """
@@ -885,7 +927,8 @@ class VDA5050Controller(Node):
         action_result: ProcessVDAAction.Result = future.result().result
         current_action: VDACurrentAction = action_result.result
         self._process_vda_action_goal_handle_dict.pop(current_action.action_id)
-        self._update_action_status(current_action.action_id, current_action.action_status, current_action.result_description)
+        self._update_action_status(
+            current_action.action_id, current_action.action_status, current_action.result_description)
         self.logger.info(f"VDA Action finished. Result: {current_action}")
 
         # Create an error entry for failed action
@@ -895,11 +938,13 @@ class VDA5050Controller(Node):
                 error_description=current_action.result_description,
                 error_level=VDAError.FATAL,
                 error_references=[
-                    VDAErrorReference(reference_key="action_id", reference_value=current_action.action_id)
+                    VDAErrorReference(reference_key="action_id",
+                                      reference_value=current_action.action_id)
                 ],
             )
             current_errors = self._current_state.errors
-            self._update_state({"errors": current_errors + [error]}, publish_now=True)
+            self._update_state(
+                {"errors": current_errors + [error]}, publish_now=True)
             self._update_state({"errors": current_errors})
 
     # Order
@@ -923,7 +968,8 @@ class VDA5050Controller(Node):
         # Validate order msg
         msg_is_valid, error = self.order_msg_is_valid(order)
         if not msg_is_valid:
-            self._reject_order(order, OrderRejectErrors.VALIDATION_ERROR, error.error_description)
+            self._reject_order(
+                order, OrderRejectErrors.VALIDATION_ERROR, error.error_description)
             return
 
         accept_mode = None
@@ -956,7 +1002,8 @@ class VDA5050Controller(Node):
 
             if update_id_diff == 0:
                 # Same update id, discard the msg
-                self.logger.info(f"Order [{order.order_id}] discarded. Same order update id.")
+                self.logger.info(
+                    f"Order [{order.order_id}] discarded. Same order update id.")
                 return
             elif update_id_diff < 0 or not match_last_new_base_nodes:
                 # Reject if update id is lower or if last and new base nodes doesn't match
@@ -977,7 +1024,8 @@ class VDA5050Controller(Node):
                 )
 
         if reject_error:
-            self._reject_order(order=order, error=reject_error, description=error_description)
+            self._reject_order(order=order, error=reject_error,
+                               description=error_description)
         else:
             self._accept_order(order=order, mode=accept_mode)
 
@@ -1025,7 +1073,8 @@ class VDA5050Controller(Node):
 
         # If there are no actions, but there are node / edge states, there is an active order
         has_nodes_and_edges = (
-            len(self._current_state.node_states) and len(self._current_state.edge_states)
+            len(self._current_state.node_states) and len(
+                self._current_state.edge_states)
         )
 
         if has_nodes_and_edges:
@@ -1092,14 +1141,16 @@ class VDA5050Controller(Node):
             node for node in self._current_order.nodes if node.released
         ]
         if not base_order_nodes:
-            self.logger.error("Error while validating stitch node: current order does not have any node.")
+            self.logger.error(
+                "Error while validating stitch node: current order does not have any node.")
             return False
         last_node = base_order_nodes[-1]
         stitch_node = order.nodes[0]
 
         # Return False if node actions differ
         if len(last_node.actions) != len(stitch_node.actions):
-            self.logger.error("Error while validating stitch node: number of actions don't match")
+            self.logger.error(
+                "Error while validating stitch node: number of actions don't match")
             return False
 
         # Evaluate all actions are equal and in the same order
@@ -1197,7 +1248,8 @@ class VDA5050Controller(Node):
 
         if mode == OrderAcceptModes.STITCH:
             # Accept STITCH order
-            self.logger.debug("Clearing horizon and appending new graph to the current base.")
+            self.logger.debug(
+                "Clearing horizon and appending new graph to the current base.")
 
             # Clear horizon on current state
             # Avoid copying the stitching node twice
@@ -1217,7 +1269,8 @@ class VDA5050Controller(Node):
                 for node in self._current_order.nodes
                 if node.released and node.sequence_id != order.nodes[0].sequence_id
             ]
-            base_order_edges = [edge for edge in self._current_order.edges if edge.released]
+            base_order_edges = [
+                edge for edge in self._current_order.edges if edge.released]
 
             self._current_order.order_update_id = order.order_update_id
             self._current_order.zone_set_id = order.zone_set_id
@@ -1329,7 +1382,6 @@ class VDA5050Controller(Node):
                         "unchanged and falling back to post-goal dispatch."
                     )
 
-
     def _reject_order(self, order: VDAOrder, error: OrderRejectErrors, description: str = ""):
         """
         Reject order.
@@ -1350,7 +1402,8 @@ class VDA5050Controller(Node):
 
             # reference_key value is snake_case for ROS2; camelCase conversion for MQTT is done in mqtt_bridge
             error_references.append(
-                VDAErrorReference(reference_key="order_id", reference_value=order.order_id)
+                VDAErrorReference(reference_key="order_id",
+                                  reference_value=order.order_id)
             )
             error_references.append(
                 VDAErrorReference(
@@ -1360,7 +1413,8 @@ class VDA5050Controller(Node):
         elif error == OrderRejectErrors.NO_ROUTE_ERROR:
             # On noRouteError send 1st node as reference
             error_references.append(
-                VDAErrorReference(reference_key="node_id", reference_value=order.nodes[0].node_id)
+                VDAErrorReference(reference_key="node_id",
+                                  reference_value=order.nodes[0].node_id)
             )
 
         order_error = VDAError()
@@ -1393,7 +1447,8 @@ class VDA5050Controller(Node):
             self.logger.error(
                 "cancelOrder action request failed. There is no active order running."
             )
-            self._update_action_status(self._cancel_action.action_id, VDACurrentAction.FAILED)
+            self._update_action_status(
+                self._cancel_action.action_id, VDACurrentAction.FAILED)
             # The AGV must report a “noOrderToCancel” error with the errorLevel set to warning.
             # The actionId of the instantAction must be passed as an errorReference.
             error = VDAError()
@@ -1408,18 +1463,21 @@ class VDA5050Controller(Node):
 
             # Generate error and publish it, then delete it
             current_errors = self._current_state.errors
-            self._update_state({"errors": current_errors + [error]}, publish_now=True)
+            self._update_state(
+                {"errors": current_errors + [error]}, publish_now=True)
             self._update_state({"errors": current_errors})
             self._cancel_action = None
             return
 
         # Set cancelOrder action state to running
-        self._update_action_status(self._cancel_action.action_id, VDACurrentAction.RUNNING)
+        self._update_action_status(
+            self._cancel_action.action_id, VDACurrentAction.RUNNING)
 
         # Set waiting actions to failed
         for action_state in self._current_state.action_states:
             if action_state.action_status == VDACurrentAction.WAITING:
-                self._update_action_status(action_state.action_id, VDACurrentAction.FAILED)
+                self._update_action_status(
+                    action_state.action_id, VDACurrentAction.FAILED)
 
         # Interrupt any running action
         vda_action_goal_handles = self._process_vda_action_goal_handle_dict.values()
@@ -1459,7 +1517,8 @@ class VDA5050Controller(Node):
                 "edge_states": [],
             }
         )
-        self._update_action_status(self._cancel_action.action_id, VDACurrentAction.FINISHED)
+        self._update_action_status(
+            self._cancel_action.action_id, VDACurrentAction.FINISHED)
         self._current_order = VDAOrder(order_id="-1")
         self._cancel_action = None
         self._current_node_goal = None
@@ -1700,7 +1759,8 @@ class VDA5050Controller(Node):
             else:
                 # Otherwise we can just use the single node navigation methods
                 self.logger.info(f"Processing node: {next_node}")
-                self.send_adapter_navigate_to_node(edge=next_edge, node=next_node)
+                self.send_adapter_navigate_to_node(
+                    edge=next_edge, node=next_node)
         else:
             self.logger.error(
                 f"{next_node} Already current goal", throttle_duration_sec=5)
@@ -1728,10 +1788,12 @@ class VDA5050Controller(Node):
         # Send goal to action server
         self.logger.info("Navigate to node goal request sent.")
         self._current_node_goal = node
-        send_goal_future = self._navigate_to_node_act_cli.send_goal_async(goal_msg)
+        send_goal_future = self._navigate_to_node_act_cli.send_goal_async(
+            goal_msg)
 
         # Register callback to be executed when the goal is accepted
-        send_goal_future.add_done_callback(self._navigate_to_node_goal_response_callback)
+        send_goal_future.add_done_callback(
+            self._navigate_to_node_goal_response_callback)
 
     def _navigate_to_node_goal_response_callback(self, future: Future):
         """
@@ -1744,7 +1806,8 @@ class VDA5050Controller(Node):
         """
         self._navigate_to_node_goal_handle = future.result()
         if not self._navigate_to_node_goal_handle.accepted:
-            self.logger.error("Navigate to node goal request rejected by adapter. Trying again.")
+            self.logger.error(
+                "Navigate to node goal request rejected by adapter. Trying again.")
             self._navigate_to_node_goal_handle = None
             self._current_node_goal = None
             return
@@ -1754,7 +1817,8 @@ class VDA5050Controller(Node):
 
         # Add callback to handle action result
         get_result_future = self._navigate_to_node_goal_handle.get_result_async()
-        get_result_future.add_done_callback(self._navigate_to_node_result_callback)
+        get_result_future.add_done_callback(
+            self._navigate_to_node_result_callback)
 
     def _navigate_to_node_result_callback(self, future: Future):
         """
@@ -1806,7 +1870,8 @@ class VDA5050Controller(Node):
         ]
 
         current_errors = self._current_state.errors
-        self._update_state({"errors": current_errors + [error]}, publish_now=True)
+        self._update_state(
+            {"errors": current_errors + [error]}, publish_now=True)
         self._current_node_goal = None
 
     def _process_last_edge_node(self):
@@ -1865,19 +1930,22 @@ class VDA5050Controller(Node):
             goal_msg, feedback_callback=self._navigate_through_nodes_feedback_callback)
 
         # Register callback to be executed when the goal is accepted
-        send_goal_future.add_done_callback(self._navigate_through_nodes_goal_response_callback)
+        send_goal_future.add_done_callback(
+            self._navigate_through_nodes_goal_response_callback)
 
     def _navigate_through_nodes_goal_response_callback(self, future: Future):
         """Response callback function for navigate through nodes goal request."""
         self._nav_through_nodes_goal_pending = False
         self._navigate_through_nodes_goal_handle = future.result()
         if not self._navigate_through_nodes_goal_handle.accepted:
-            self.logger.error("Navigate through nodes goal request rejected by adapter. Trying again.")
+            self.logger.error(
+                "Navigate through nodes goal request rejected by adapter. Trying again.")
             self._navigate_through_nodes_goal_handle = None
             self._current_node_goal = None
             return
 
-        self.logger.info("Navigate through nodes goal request accepted by adapter.")
+        self.logger.info(
+            "Navigate through nodes goal request accepted by adapter.")
 
         if self._canceling_order():
             self.logger.info(
@@ -1887,7 +1955,8 @@ class VDA5050Controller(Node):
             self._navigate_through_nodes_goal_handle.cancel_goal_async()
 
         get_result_future = self._navigate_through_nodes_goal_handle.get_result_async()
-        get_result_future.add_done_callback(self._navigate_through_nodes_result_callback)
+        get_result_future.add_done_callback(
+            self._navigate_through_nodes_result_callback)
 
     def _navigate_through_nodes_result_callback(self, future: Future):
         """
@@ -2063,7 +2132,8 @@ class VDA5050Controller(Node):
         }
 
         for key, val in parameters_physical.items():
-            value = read_double_parameter(self, "factsheet.physical_parameters." + key, val)
+            value = read_double_parameter(
+                self, "factsheet.physical_parameters." + key, val)
             setattr(physical_parameters, key, value)
 
         return physical_parameters
@@ -2135,7 +2205,8 @@ class VDA5050Controller(Node):
             }
 
             for key, val in parameters_timing.items():
-                value = read_double_parameter(self, "factsheet.protocol_limits.timing." + key, val)
+                value = read_double_parameter(
+                    self, "factsheet.protocol_limits.timing." + key, val)
                 setattr(timing, key, value)
             return timing
 
@@ -2155,7 +2226,8 @@ class VDA5050Controller(Node):
 
         # Get supported actions from adapter
         self._supported_actions_svc_cli.wait_for_service()
-        response = self._supported_actions_svc_cli.call(SupportedActions.Request())
+        response = self._supported_actions_svc_cli.call(
+            SupportedActions.Request())
         protocol_features.agv_actions = response.agv_actions
 
         return protocol_features
@@ -2173,7 +2245,8 @@ class VDA5050Controller(Node):
             """
             wheel_definitions = []
             base_key = "factsheet.agv_geometry.wheel_definitions."
-            wheel_definitions_ids = read_str_array_parameter(self, base_key + "ids", [])
+            wheel_definitions_ids = read_str_array_parameter(
+                self, base_key + "ids", [])
             for wheel_id in wheel_definitions_ids:
                 wheel_key = base_key + "wheel_" + wheel_id + "."
                 wheel_definition = VDAWheelDefinition()
@@ -2202,7 +2275,8 @@ class VDA5050Controller(Node):
                 wheel_definition.diameter = read_double_parameter(
                     self, wheel_key + "diameter", 0.0
                 )
-                wheel_definition.width = read_double_parameter(self, wheel_key + "width", 0.0)
+                wheel_definition.width = read_double_parameter(
+                    self, wheel_key + "width", 0.0)
                 wheel_definition.center_displacement = read_double_parameter(
                     self, wheel_key + "center_displacement", 0.0
                 )
@@ -2224,13 +2298,16 @@ class VDA5050Controller(Node):
             """
             envelopes2d = []
             base_key = "factsheet.agv_geometry.envelopes2d."
-            envelop2d_ids = read_str_array_parameter(self, base_key + "ids", [])
+            envelop2d_ids = read_str_array_parameter(
+                self, base_key + "ids", [])
             for envelop_id in envelop2d_ids:
                 envelop2d_key = base_key + "envelop2d_" + envelop_id + "."
                 envelop2d = VDAEnvelope2D()
 
-                envelop2d.set = read_str_parameter(self, envelop2d_key + "set", "")
-                envelop2d.description = read_str_parameter(self, envelop2d_key + "description", "")
+                envelop2d.set = read_str_parameter(
+                    self, envelop2d_key + "set", "")
+                envelop2d.description = read_str_parameter(
+                    self, envelop2d_key + "description", "")
                 polygon_points = read_str_array_parameter(
                     self, envelop2d_key + "polygon_points", []
                 )
@@ -2264,7 +2341,8 @@ class VDA5050Controller(Node):
             """
             envelopes3d = []
             base_key = "factsheet.agv_geometry.envelopes3d."
-            envelop3d_ids = read_str_array_parameter(self, base_key + "ids", [])
+            envelop3d_ids = read_str_array_parameter(
+                self, base_key + "ids", [])
             for envelop_id in envelop3d_ids:
                 envelop3d_key = base_key + "envelop3d_" + envelop_id + "."
                 envelop3d = VDAEnvelope3D()
@@ -2303,7 +2381,8 @@ class VDA5050Controller(Node):
             """
             load_sets = []
             base_key = "factsheet.load_specification.load_sets."
-            load_sets_ids = read_str_array_parameter(self, base_key + "ids", [])
+            load_sets_ids = read_str_array_parameter(
+                self, base_key + "ids", [])
 
             for load_sets_id in load_sets_ids:
                 load_set = VDALoadSet()
@@ -2329,9 +2408,11 @@ class VDA5050Controller(Node):
 
                 for key, val in parameters_load_set.items():
                     if type(val) == str:
-                        value = read_str_parameter(self, load_set_key + key, val)
+                        value = read_str_parameter(
+                            self, load_set_key + key, val)
                     else:
-                        value = read_double_parameter(self, load_set_key + key, val)
+                        value = read_double_parameter(
+                            self, load_set_key + key, val)
                     setattr(load_set, key, value)
 
                 load_set.load_positions = read_str_array_parameter(
