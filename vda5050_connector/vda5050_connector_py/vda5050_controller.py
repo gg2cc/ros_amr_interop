@@ -785,6 +785,12 @@ class VDA5050Controller(Node):
                 f"Processing action '{action.action_id}' of type '{action.action_type}'"
             )
 
+            if action.action_id in self._instant_action_ids:
+                self.logger.warning(
+                    f"Ignoring duplicate instant action '{action.action_id}'."
+                )
+                continue
+
             # Add action to action_states and track it as an instant action
             action_state = VDACurrentAction(
                 action_id=action.action_id,
@@ -899,7 +905,11 @@ class VDA5050Controller(Node):
 
         get_result_future = goal_handle.get_result_async()
         get_result_future.add_done_callback(
-            self._process_vda_action_result_callback)
+            functools.partial(
+                self._process_vda_action_result_callback,
+                action.action_id,
+            )
+        )
 
     def _process_vda_action_feedback_callback(self, feedback_msg: ProcessVDAAction.Feedback):
         """
@@ -915,7 +925,7 @@ class VDA5050Controller(Node):
         self._update_action_status(
             current_action.action_id, current_action.action_status)
 
-    def _process_vda_action_result_callback(self, future: Future):
+    def _process_vda_action_result_callback(self, action_id: str, future: Future):
         """
         Process VDA actions goal request.
 
@@ -926,9 +936,14 @@ class VDA5050Controller(Node):
         """
         action_result: ProcessVDAAction.Result = future.result().result
         current_action: VDACurrentAction = action_result.result
-        self._process_vda_action_goal_handle_dict.pop(current_action.action_id)
+        # 使用发送 goal 时保存的 actionId，兼容旧版 adapter 返回空 CurrentAction。
+        result_action_id = current_action.action_id or action_id
+        result_status = current_action.action_status or VDACurrentAction.FAILED
+        self._process_vda_action_goal_handle_dict.pop(result_action_id, None)
         self._update_action_status(
-            current_action.action_id, current_action.action_status, current_action.result_description)
+            result_action_id, result_status, current_action.result_description)
+        current_action.action_id = result_action_id
+        current_action.action_status = result_status
         self.logger.info(f"VDA Action finished. Result: {current_action}")
 
         # Create an error entry for failed action
@@ -938,8 +953,8 @@ class VDA5050Controller(Node):
                 error_description=current_action.result_description,
                 error_level=VDAError.FATAL,
                 error_references=[
-                    VDAErrorReference(reference_key="action_id",
-                                      reference_value=current_action.action_id)
+                    VDAErrorReference(
+                        reference_key="action_id", reference_value=result_action_id)
                 ],
             )
             current_errors = self._current_state.errors
