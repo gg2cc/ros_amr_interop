@@ -68,6 +68,45 @@ from vda5050_msgs.msg import Visualization as VDAVisualization
 NODE_NAME = "mqtt_bridge"
 
 
+def normalize_order_sequence_ids(order):
+    """将 openTCS/KCC 的路径序号转换为 VDA5050 的交替序号。"""
+    nodes = order.get("nodes", [])
+    edges = order.get("edges", [])
+    if not nodes:
+        return False
+
+    node_ids = [node.get("node_id") for node in nodes]
+    node_index = {node_id: index for index, node_id in enumerate(node_ids)}
+    if len(node_index) != len(node_ids) or any(node_id is None for node_id in node_ids):
+        return False
+
+    standard_nodes = all(
+        node.get("sequence_id") == index * 2
+        for index, node in enumerate(nodes)
+    )
+    standard_edges = all(
+        edge.get("sequence_id") == index * 2 + 1
+        for index, edge in enumerate(edges)
+    )
+    if standard_nodes and standard_edges:
+        return False
+
+    # 只有边能连接节点列表中的相邻节点时才自动转换，避免改变实际路径关系。
+    edge_indexes = []
+    for edge in edges:
+        start_index = node_index.get(edge.get("start_node_id"))
+        end_index = node_index.get(edge.get("end_node_id"))
+        if start_index is None or end_index != start_index + 1:
+            return False
+        edge_indexes.append(start_index)
+
+    for index, node in enumerate(nodes):
+        node["sequence_id"] = index * 2
+    for edge, start_index in zip(edges, edge_indexes):
+        edge["sequence_id"] = start_index * 2 + 1
+    return True
+
+
 def generate_vda_order_msg(order):
     """
     Convert an Order message into a ROS2 Order message represented as a dict.
@@ -82,11 +121,18 @@ def generate_vda_order_msg(order):
 
     """
     vda_order = copy.deepcopy(order)
+    normalize_order_sequence_ids(vda_order)
     for node in vda_order["nodes"]:
         # Force all numbers to float. Values with no decimals are
         # interpret as integers, causing the validation errors
-        for k in ["x", "y", "theta"]:
+        for k in ["x", "y"]:
             node["node_position"][k] = float(node["node_position"][k])
+        # 某些调度器发送的 nodePosition 不包含 theta；导航适配器按 nodeId
+        # 选择实际路径点，因此缺失角度时使用默认值仍可完成订单转换。
+        if "theta" not in node["node_position"]:
+            node["node_position"]["theta"] = 0.0
+        else:
+            node["node_position"]["theta"] = float(node["node_position"]["theta"])
         node["node_position"] = VDANodePosition(**node["node_position"])
         for action in node["actions"]:
             if "action_parameters" in action:
@@ -366,13 +412,24 @@ class MQTTBridge(Node):
         """MQTT client message callback."""
         try:
             msg_json = json_camel_to_snake_case(msg.payload)
-            self.logger.debug(f"Received '{msg_json}' from '{msg.topic}' topic")
+            self.logger.info(f"Received '{msg_json}' from '{msg.topic}' topic")
         except json.decoder.JSONDecodeError:
             self.logger.error(f"Failed to decode message: '{msg.payload}'")
             return
 
         try:
             if msg.topic.endswith("order"):
+                if normalize_order_sequence_ids(msg_json):
+                    self.logger.info(
+                        "Normalized non-standard order sequence IDs to VDA5050 "
+                        "alternating IDs: nodes=0,2,... edges=1,3,..."
+                    )
+                for node in msg_json.get("nodes", []):
+                    if "theta" not in node.get("node_position", {}):
+                        self.logger.info(
+                            f"VDA5050 order node '{node.get('node_id', '')}' "
+                            "has no theta; defaulting to 0.0."
+                        )
                 vda_order_msg = VDAOrder(**generate_vda_order_msg(msg_json))
                 self._order_pub.publish(msg=vda_order_msg)
             if msg.topic.endswith("instantActions"):
