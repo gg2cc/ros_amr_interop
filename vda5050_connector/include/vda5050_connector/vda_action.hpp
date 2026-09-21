@@ -149,6 +149,15 @@ public:
 
       action_state = get_action_state();
     }
+
+    // 执行线程结束时必须完成 ROS action goal，否则 controller 会收到空的默认结果。
+    if (goal_handle_ && goal_handle_->is_active()) {
+      if (action_state_ == STATES::FINISHED) {
+        goal_handle_->succeed(result_);
+      } else {
+        goal_handle_->abort(result_);
+      }
+    }
   }
 
   /**
