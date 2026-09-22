@@ -192,6 +192,8 @@ class VDA5050Controller(Node):
             serial_number=self._serial_number,
             manufacturer=self._manufacturer_name,
         )
+        # 防止 adapter 状态服务响应较慢时，Visualization 定时器重复堆积请求。
+        self._visualization_state_request_pending = False
         self._current_factsheet = VDAFactsheet(
             header_id=0,
             version=self._protocol_version,
@@ -467,10 +469,29 @@ class VDA5050Controller(Node):
 
     def _publish_visualization(self):
         """Publish the current Visualization msg."""
+        if self._visualization_state_request_pending:
+            return
+
         self._current_visualization.header_id += 1
         self._current_visualization.timestamp = get_vda5050_ts()
-        self.get_state_from_adapter()  # Need the most recent AGVPosition and velocity
-        self._publish_visualization_to_mc.publish(self._current_visualization)
+        self._visualization_state_request_pending = True
+        try:
+            # 使用异步 service，避免单线程执行器等待 adapter 响应时无法处理该响应。
+            future = self._get_adapter_state_svc_cli.call_async(GetState.Request())
+            future.add_done_callback(self._publish_visualization_after_state)
+        except Exception as exc:
+            self._visualization_state_request_pending = False
+            self.logger.error(f"Failed to request adapter state for visualization: {exc}")
+
+    def _publish_visualization_after_state(self, future: Future):
+        """在 adapter 状态返回后更新并发布 Visualization。"""
+        try:
+            self._update_state_from_adapter(future.result())
+            self._publish_visualization_to_mc.publish(self._current_visualization)
+        except Exception as exc:
+            self.logger.error(f"Failed to publish visualization: {exc}")
+        finally:
+            self._visualization_state_request_pending = False
 
     def _publish_factsheet(self):
         """Publish the current Factsheet msg."""
