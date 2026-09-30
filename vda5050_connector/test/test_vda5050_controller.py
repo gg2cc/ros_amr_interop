@@ -30,6 +30,7 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 import rclpy
+import pytest
 from rclpy.logging import LoggingSeverity
 from rclpy.task import Future
 from rclpy.parameter import Parameter

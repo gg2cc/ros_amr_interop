@@ -57,6 +57,7 @@ from vda5050_msgs.msg import ActionParameter as VDAActionParameter
 from vda5050_msgs.msg import Connection as VDAConnection
 from vda5050_msgs.msg import ControlPoint as VDAControlPoint
 from vda5050_msgs.msg import Edge as VDAEdge
+from vda5050_msgs.msg import Factsheet as VDAFactsheet
 from vda5050_msgs.msg import InstantActions as VDAInstantActions
 from vda5050_msgs.msg import Node as VDANode
 from vda5050_msgs.msg import NodePosition as VDANodePosition
@@ -179,7 +180,9 @@ def generate_vda_order_msg(order):
                     VDAControlPoint(
                         x=float(cp["x"]),
                         y=float(cp["y"]),
-                        orientation=float(cp["orientation"]),
+                        # 当前 ROS ControlPoint 用必填数值表达方向；车端按 nodeId 导航，
+                        # 暂以 0.0 承接标准中省略 orientation 的控制点。
+                        orientation=float(cp.get("orientation", 0.0)),
                         weight=float(cp.get("weight", 1)),
                     )
                     for cp in edge["trajectory"]["control_points"]
@@ -406,7 +409,7 @@ class MQTTBridge(Node):
             )
 
         else:
-            self.logger.error("Failed to connect, return code %d\n", rc)
+            self.logger.error(f"Failed to connect, return code {rc}")
 
     def on_message_mqtt(self, client, userdata, msg):
         """MQTT client message callback."""
@@ -494,6 +497,18 @@ class MQTTBridge(Node):
             qos_profile=10,
         )
 
+        self._factsheet_sub = self.create_subscription(
+            msg_type=VDAFactsheet,
+            topic=get_vda5050_ros2_topic(
+                manufacturer=self._manufacturer_name,
+                serial_number=self._serial_number,
+                topic="factsheet",
+                interface_name=self._interface_name
+            ),
+            callback=self._publish_factsheet,
+            qos_profile=10,
+        )
+
         self._order_pub = self.create_publisher(
             msg_type=VDAOrder,
             topic=get_vda5050_ros2_topic(
@@ -558,7 +573,7 @@ class MQTTBridge(Node):
 
         self.mqtt_client.disconnect()
 
-    def _publish_to_topic(self, msg, topic):
+    def _publish_to_topic(self, msg, topic, qos=0, retain=False):
         """
         Publish a ROS2 message to an MQTT topic.
 
@@ -566,11 +581,13 @@ class MQTTBridge(Node):
         ----
             msg (Any): VDA5050 ROS2 message.
             topic (str): topic for publishing the VDA5050 MQTT message.
+            qos (int): MQTT QoS level for this topic.
+            retain (bool): Whether the broker should retain the latest message.
 
         """
         json_msg = convert_ros_message_to_json(msg)
         self.logger.debug(f"Publishing MQTT message to topic {topic}: {json_msg}")
-        self.mqtt_client.publish(topic, json_msg)
+        self.mqtt_client.publish(topic, json_msg, qos=qos, retain=retain)
 
     def _publish_state(self, msg: VDAOrderState):
         """
@@ -609,6 +626,18 @@ class MQTTBridge(Node):
             manufacturer=self._manufacturer_name,
             serial_number=self._serial_number,
             topic="connection",
+            major_version=self.vda5050_version_alias,
+            interface_name=self._interface_name
+        )
+        # VDA5050 connection 使用 QoS 1；保留最后状态供新订阅者读取，Will 也使用相同策略。
+        self._publish_to_topic(msg, topic, qos=1, retain=True)
+
+    def _publish_factsheet(self, msg: VDAFactsheet):
+        """Publish the controller factsheet on the VDA5050 MQTT topic."""
+        topic = get_vda5050_mqtt_topic(
+            manufacturer=self._manufacturer_name,
+            serial_number=self._serial_number,
+            topic="factsheet",
             major_version=self.vda5050_version_alias,
             interface_name=self._interface_name
         )

@@ -45,6 +45,7 @@ from vda5050_connector_py.utils import convert_ros_message_to_json
 from vda5050_msgs.msg import Order
 from vda5050_msgs.msg import Node
 from vda5050_msgs.msg import Edge
+from vda5050_msgs.msg import Factsheet
 from vda5050_msgs.msg import OrderState
 from vda5050_msgs.msg import Action
 from vda5050_msgs.msg import Connection
@@ -357,6 +358,7 @@ def test_vda5050_mqtt_bridge_generate_vda_order_msg(mocker):
     assert trajectory.knot_vector.tolist() == [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
     cpoints = trajectory.control_points
     assert cpoints[0].x == 1.0 and cpoints[0].y == 2 and cpoints[0].weight == 2.0
+    assert cpoints[0].orientation == 0.0
     assert cpoints[1].x == 2.0 and cpoints[1].y == 4 and cpoints[1].weight == 1.5
     assert cpoints[2].x == 2.0 and cpoints[2].y == 4 and cpoints[2].weight == 1.0
 
@@ -436,6 +438,8 @@ def test_vda5050_mqtt_bridge_defaults(setup_rclpy, mocker, mock_mqtt_client):
     assert mqtt_bridge._manufacturer_name == "robots"
     assert mqtt_bridge._serial_number == "robot_1"
     mqtt_client = mqtt_bridge.mqtt_client
+    mqtt_client.is_connected.return_value = False
+    mqtt_bridge._connect_to_broker()
     assert mqtt_client.tls_set.call_count == 0
     assert mqtt_client.username_pw_set.call_count == 0
 
@@ -449,7 +453,7 @@ def test_vda5050_mqtt_bridge_defaults(setup_rclpy, mocker, mock_mqtt_client):
     will_payload = convert_ros_message_to_json(msg)
 
     mqtt_client.will_set.assert_called_with(
-        topic="uagv/v1/robots/robot_1/connection",
+        topic="uagv/v2/robots/robot_1/connection",
         payload=will_payload,
         qos=1,
         retain=True,
@@ -465,16 +469,20 @@ def test_vda5050_mqtt_bridge_defaults_with_tls(
             "mqtt_address": "fake_localhost",
             "mqtt_username": "username",
             "mqtt_password": "password",
+            "vda5050_protocol_version": "2.0.0",
             "manufacturer_name": "robots",
             "serial_number": "robot_1",
+            "interface_name": "uagv",
         }[param_name]
 
     mocker.patch(
-        "vda5050_connector.mqtt_bridge.read_str_parameter",
+        "vda5050_connector_py.mqtt_bridge.read_str_parameter",
         side_effect=mock_read_str_parameter,
     )
     mqtt_bridge = MQTTBridge()
     mqtt_client = mqtt_bridge.mqtt_client
+    mqtt_client.is_connected.return_value = False
+    mqtt_bridge._connect_to_broker()
     mqtt_client.tls_set.assert_called_with(
         ca_certs="/etc/ssl/certs/ca-certificates.crt", tls_version=ssl.PROTOCOL_TLSv1_2
     )
@@ -488,6 +496,8 @@ def test_vda5050_mqtt_bridge_defaults_with_tls(
         name="VDA5050_CONNECTOR_TLS_CA_CERT", value="/foo/ca-certificates.crt"
     )
     mqtt_bridge = MQTTBridge()
+    mqtt_bridge.mqtt_client.is_connected.return_value = False
+    mqtt_bridge._connect_to_broker()
     mqtt_bridge.mqtt_client.tls_set.assert_called_with(
         ca_certs="/foo/ca-certificates.crt", tls_version=ssl.PROTOCOL_TLSv1_2
     )
@@ -516,6 +526,12 @@ def test_vda5050_mqtt_bridge_subscriptions(setup_rclpy, mocker, mock_mqtt_client
         callback=mqtt_bridge._publish_visualization,
         qos_profile=10,
     )
+    mqtt_bridge.create_subscription.assert_any_call(
+        msg_type=Factsheet,
+        topic="/uagv/v1/robots/robot_1/factsheet",
+        callback=mqtt_bridge._publish_factsheet,
+        qos_profile=10,
+    )
 
     mqtt_bridge.create_publisher.assert_any_call(
         msg_type=Order, topic="/uagv/v1/robots/robot_1/order", qos_profile=10
@@ -530,6 +546,69 @@ def test_vda5050_mqtt_bridge_subscriptions(setup_rclpy, mocker, mock_mqtt_client
     mqtt_client = mqtt_bridge.mqtt_client
     assert mqtt_client.on_connect == mqtt_bridge.on_connect_mqtt
     assert mqtt_client.on_message == mqtt_bridge.on_message_mqtt
+
+
+def test_vda5050_mqtt_bridge_publishes_connection_with_qos_one(
+    setup_rclpy, mocker, mock_mqtt_client
+):
+    mqtt_bridge = MQTTBridge()
+    msg = Connection(
+        timestamp="2026-09-30T12:00:00.000Z",
+        version="2.0.0",
+        manufacturer="robots",
+        serial_number="robot_1",
+        connection_state=Connection.ONLINE,
+    )
+
+    mqtt_bridge._publish_connection(msg)
+
+    mqtt_bridge.mqtt_client.publish.assert_called_once_with(
+        "uagv/v2/robots/robot_1/connection",
+        convert_ros_message_to_json(msg),
+        qos=1,
+        retain=True,
+    )
+
+
+def test_vda5050_mqtt_bridge_publishes_state_with_qos_zero(
+    setup_rclpy, mocker, mock_mqtt_client
+):
+    mqtt_bridge = MQTTBridge()
+    msg = OrderState(
+        timestamp="2026-09-30T12:00:00.000Z",
+        version="2.0.0",
+        manufacturer="robots",
+        serial_number="robot_1",
+    )
+
+    mqtt_bridge._publish_state(msg)
+
+    mqtt_bridge.mqtt_client.publish.assert_called_once_with(
+        "uagv/v2/robots/robot_1/state",
+        convert_ros_message_to_json(msg),
+        qos=0,
+        retain=False,
+    )
+
+
+def test_vda5050_mqtt_bridge_publishes_factsheet_with_qos_zero(
+    setup_rclpy, mocker, mock_mqtt_client
+):
+    mqtt_bridge = MQTTBridge()
+    msg = Factsheet(
+        version="2.0.0",
+        manufacturer="robots",
+        serial_number="robot_1",
+    )
+
+    mqtt_bridge._publish_factsheet(msg)
+
+    mqtt_bridge.mqtt_client.publish.assert_called_once_with(
+        "uagv/v2/robots/robot_1/factsheet",
+        convert_ros_message_to_json(msg),
+        qos=0,
+        retain=False,
+    )
 
 
 @pytest.mark.parametrize(
