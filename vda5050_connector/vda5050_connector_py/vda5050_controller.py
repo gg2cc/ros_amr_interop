@@ -64,6 +64,7 @@ from vda5050_msgs.msg import Envelope3D as VDAEnvelope3D
 from vda5050_msgs.msg import Error as VDAError
 from vda5050_msgs.msg import ErrorReference as VDAErrorReference
 from vda5050_msgs.msg import Factsheet as VDAFactsheet
+from vda5050_msgs.msg import Info as VDAInfo
 from vda5050_msgs.msg import InstantActions as VDAInstantActions
 from vda5050_msgs.msg import LoadSet as VDALoadSet
 from vda5050_msgs.msg import LoadSpecification as VDALoadSpecification
@@ -1226,6 +1227,11 @@ class VDA5050Controller(Node):
                 return invalid_order(
                     f"Released edge '{edge.edge_id}' must have released endpoint nodes."
                 )
+            if edge.actions:
+                return invalid_order(
+                    f"Edge '{edge.edge_id}' contains actions, but this AGV adapter "
+                    "does not support edge-scoped action execution."
+                )
 
         # Base/horizon 必须是连续前缀；一旦遇到未发布项，后续不能重新发布。
         released_sequence = []
@@ -2282,6 +2288,42 @@ class VDA5050Controller(Node):
             self.logger.warn(
                 f"Could not extend navigation: {result.message}. "
                 "Will dispatch new goal when current finishes.")
+            description = (
+                "In-flight path extension is unsupported by the AGV controller. "
+                "The current path will finish before remaining released nodes are dispatched."
+            )
+            partial_state = {}
+            if not any(
+                error.error_type == OrderRejectErrors.ORDER_UPDATE_ERROR.value
+                and error.error_description == description
+                for error in self._current_state.errors
+            ):
+                error = VDAError()
+                error.error_type = OrderRejectErrors.ORDER_UPDATE_ERROR.value
+                error.error_description = description
+                error.error_level = VDAError.WARNING
+                error.error_references = [
+                    VDAErrorReference(
+                        reference_key="order_id",
+                        reference_value=self._current_state.order_id,
+                    ),
+                    VDAErrorReference(
+                        reference_key="order_update_id",
+                        reference_value=str(self._current_state.order_update_id),
+                    ),
+                ]
+                partial_state["errors"] = self._current_state.errors + [error]
+
+            info_type = "NAVIGATION_EXTENSION_DEFERRED"
+            if not any(info.info_type == info_type for info in self._current_state.informations):
+                info = VDAInfo()
+                info.info_type = info_type
+                info.info_description = description
+                info.info_level = VDAInfo.INFO
+                partial_state["informations"] = self._current_state.informations + [info]
+
+            if partial_state:
+                self._update_state(partial_state, publish_now=True)
 
     # Factsheet
 

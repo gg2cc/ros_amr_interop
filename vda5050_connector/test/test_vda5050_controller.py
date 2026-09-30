@@ -36,6 +36,8 @@ from rclpy.task import Future
 from rclpy.parameter import Parameter
 
 from uuid import uuid4
+from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 from vda5050_connector_py.vda5050_controller import VDA5050Controller
 from vda5050_connector_py.vda5050_controller import OrderAcceptModes
@@ -43,6 +45,7 @@ from vda5050_connector_py.vda5050_controller import OrderRejectErrors
 from vda5050_connector_py.utils import get_vda5050_ts
 from vda5050_connector.action import NavigateToNode
 from vda5050_connector.action import NavigateThroughNodes
+from vda5050_connector.srv import ExtendNavigation
 from vda5050_msgs.msg import Order
 from vda5050_msgs.msg import Node
 from vda5050_msgs.msg import Edge
@@ -51,6 +54,7 @@ from vda5050_msgs.msg import Action
 from vda5050_msgs.msg import ActionParameter
 from vda5050_msgs.msg import InstantActions
 from vda5050_msgs.msg import CurrentAction
+from vda5050_msgs.msg import OrderState
 
 
 def get_order_new(order_id=str(uuid4()), order_update_id=0):
@@ -191,6 +195,7 @@ def test_order_msg_is_valid_accepts_standard_graph():
         ("edge_count", "fewer edge"),
         ("release_gap", "contiguous order prefix"),
         ("duplicate_action", "Duplicate order action"),
+        ("edge_action", "does not support edge-scoped action execution"),
         ("unreleased_first_node", "first order node must be released"),
     ],
 )
@@ -212,6 +217,11 @@ def test_order_msg_is_valid_rejects_invalid_graph(mutation, expected_description
         ]
         order.nodes[1].actions = [
             Action(action_id="duplicate", action_type="drop",
+                   blocking_type=Action.NONE)
+        ]
+    elif mutation == "edge_action":
+        order.edges[0].actions = [
+            Action(action_id="edge-action", action_type="setLight",
                    blocking_type=Action.NONE)
         ]
     else:
@@ -282,6 +292,36 @@ def test_instant_action_msg_is_valid_rejects_duplicate_action_ids():
 
     assert is_valid is False
     assert "Duplicate" in error.error_description
+
+
+def test_failed_navigation_extension_publishes_warning():
+    class ControllerStub:
+        def __init__(self):
+            self.logger = MagicMock()
+            self._current_state = OrderState(order_id="order-1", order_update_id=3)
+            self.published_states = []
+
+        def _update_state(self, partial_state, publish_now=False):
+            for field, value in partial_state.items():
+                setattr(self._current_state, field, value)
+            if publish_now:
+                self.published_states.append(self._current_state)
+
+    controller = ControllerStub()
+    response = ExtendNavigation.Response(
+        success=False,
+        message="In-flight navigation extension is not supported",
+    )
+    future = SimpleNamespace(result=lambda: response)
+
+    VDA5050Controller._extend_navigation_response_callback(controller, 8, future)
+
+    assert len(controller._current_state.errors) == 1
+    error = controller._current_state.errors[0]
+    assert error.error_type == "orderUpdateError"
+    assert error.error_level == error.WARNING
+    assert "current path will finish" in error.error_description
+    assert controller.published_states == [controller._current_state]
 
 
 def get_order_update(order_id=str(uuid4()), order_update_id=0):
