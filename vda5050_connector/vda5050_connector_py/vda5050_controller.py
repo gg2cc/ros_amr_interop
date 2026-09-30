@@ -128,6 +128,7 @@ class ActionErrors(Enum):
 
     ACTION_NOT_FOUND = "actionNotFound"
     ACTION_FAILED = "actionFailed"
+    INVALID_INSTANT_ACTION = "invalidInstantAction"
     NO_ORDER_TO_CANCEL = "noOrderToCancel"
 
 
@@ -857,7 +858,41 @@ class VDA5050Controller(Node):
             VDAError if msg in invalid.
 
         """
-        # TODO: Proper implementation
+        def invalid_action(description: str, action_id: str = ""):
+            error = VDAError()
+            error.error_type = ActionErrors.INVALID_INSTANT_ACTION.value
+            error.error_description = description
+            error.error_level = VDAError.WARNING
+            if action_id:
+                error.error_references = [
+                    VDAErrorReference(
+                        reference_key="action_id", reference_value=action_id
+                    )
+                ]
+            return False, error
+
+        if not instant_actions.actions:
+            return invalid_action("instantActions must contain at least one action.")
+
+        seen_action_ids = set()
+        for action in instant_actions.actions:
+            if not action.action_id.strip():
+                return invalid_action("Instant action actionId must not be empty.")
+            if not action.action_type.strip():
+                return invalid_action(
+                    "Instant action actionType must not be empty.", action.action_id
+                )
+            if action.action_id in seen_action_ids:
+                return invalid_action(
+                    f"Duplicate instant action actionId '{action.action_id}'.",
+                    action.action_id,
+                )
+            seen_action_ids.add(action.action_id)
+            if action.blocking_type != VDAAction.NONE:
+                return invalid_action(
+                    "Instant action blockingType must be NONE.", action.action_id
+                )
+
         return True, VDAError()
 
     # ---- Process VDA action send goals ----
@@ -1124,7 +1159,109 @@ class VDA5050Controller(Node):
             True if msg is valid, False otherwise, VDAError if msg in invalid.
 
         """
-        # TODO: Proper implementation
+        def invalid_order(description: str):
+            error = VDAError()
+            error.error_type = OrderRejectErrors.VALIDATION_ERROR.value
+            error.error_description = description
+            error.error_level = VDAError.WARNING
+            if order.order_id:
+                error.error_references = [
+                    VDAErrorReference(
+                        reference_key="order_id", reference_value=order.order_id
+                    ),
+                    VDAErrorReference(
+                        reference_key="order_update_id",
+                        reference_value=str(order.order_update_id),
+                    ),
+                ]
+            return False, error
+
+        nodes = order.nodes
+        edges = order.edges
+        if not order.order_id.strip():
+            return invalid_order("orderId must not be empty.")
+        if not nodes:
+            return invalid_order("An order must contain at least one node.")
+        if not nodes[0].released:
+            return invalid_order("The first order node must be released.")
+        if len(edges) != len(nodes) - 1:
+            return invalid_order(
+                "An order must contain exactly one fewer edge than nodes."
+            )
+
+        first_sequence_id = nodes[0].sequence_id
+        if first_sequence_id % 2 != 0:
+            return invalid_order("The first node sequenceId must be even.")
+
+        for index, node in enumerate(nodes):
+            if not node.node_id.strip():
+                return invalid_order(f"Node at index {index} has an empty nodeId.")
+            expected_sequence_id = first_sequence_id + 2 * index
+            if node.sequence_id != expected_sequence_id:
+                return invalid_order(
+                    f"Node '{node.node_id}' has sequenceId {node.sequence_id}; "
+                    f"expected {expected_sequence_id}."
+                )
+
+        for index, edge in enumerate(edges):
+            expected_sequence_id = first_sequence_id + 2 * index + 1
+            if not edge.edge_id.strip():
+                return invalid_order(f"Edge at index {index} has an empty edgeId.")
+            if edge.sequence_id != expected_sequence_id:
+                return invalid_order(
+                    f"Edge '{edge.edge_id}' has sequenceId {edge.sequence_id}; "
+                    f"expected {expected_sequence_id}."
+                )
+            # 按列表中的相邻节点检查边端点，允许同一 nodeId 在路线中重复出现。
+            if (
+                edge.start_node_id != nodes[index].node_id
+                or edge.end_node_id != nodes[index + 1].node_id
+            ):
+                return invalid_order(
+                    f"Edge '{edge.edge_id}' endpoints do not match adjacent order nodes."
+                )
+            if edge.released and not (
+                nodes[index].released and nodes[index + 1].released
+            ):
+                return invalid_order(
+                    f"Released edge '{edge.edge_id}' must have released endpoint nodes."
+                )
+
+        # Base/horizon 必须是连续前缀；一旦遇到未发布项，后续不能重新发布。
+        released_sequence = []
+        for index, node in enumerate(nodes):
+            released_sequence.append(node.released)
+            if index < len(edges):
+                released_sequence.append(edges[index].released)
+        horizon_started = False
+        for is_released in released_sequence:
+            if not is_released:
+                horizon_started = True
+            elif horizon_started:
+                return invalid_order(
+                    "Released nodes and edges must form a contiguous order prefix."
+                )
+
+        valid_blocking_types = {VDAAction.NONE, VDAAction.SOFT, VDAAction.HARD}
+        seen_action_ids = set()
+        for action in [
+            action
+            for node in nodes
+            for action in node.actions
+        ] + [action for edge in edges for action in edge.actions]:
+            if not action.action_id.strip() or not action.action_type.strip():
+                return invalid_order("Every order action requires actionId and actionType.")
+            if action.action_id in seen_action_ids:
+                return invalid_order(
+                    f"Duplicate order action actionId '{action.action_id}'."
+                )
+            seen_action_ids.add(action.action_id)
+            if action.blocking_type not in valid_blocking_types:
+                return invalid_order(
+                    f"Action '{action.action_id}' has invalid blockingType "
+                    f"'{action.blocking_type}'."
+                )
+
         return True, VDAError()
 
     def _has_current_order(self) -> bool:

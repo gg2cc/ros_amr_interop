@@ -173,6 +173,116 @@ def get_order_new(order_id=str(uuid4()), order_update_id=0):
     )
 
 
+def test_order_msg_is_valid_accepts_standard_graph():
+    order = get_order_new()
+
+    is_valid, error = VDA5050Controller.order_msg_is_valid(None, order)
+
+    assert is_valid is True
+    assert error.error_description == ""
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_description"),
+    [
+        ("sequence_id", "sequenceId"),
+        ("edge_endpoint", "endpoints"),
+        ("edge_count", "fewer edge"),
+        ("release_gap", "contiguous order prefix"),
+        ("duplicate_action", "Duplicate order action"),
+        ("unreleased_first_node", "first order node must be released"),
+    ],
+)
+def test_order_msg_is_valid_rejects_invalid_graph(mutation, expected_description):
+    order = get_order_new()
+    if mutation == "sequence_id":
+        order.edges[0].sequence_id = 0
+    elif mutation == "edge_endpoint":
+        order.edges[0].end_node_id = "unknown-node"
+    elif mutation == "edge_count":
+        order.edges.pop()
+    elif mutation == "release_gap":
+        order.edges[0].released = False
+        order.edges[1].released = True
+    elif mutation == "duplicate_action":
+        order.nodes[0].actions = [
+            Action(action_id="duplicate", action_type="pick",
+                   blocking_type=Action.NONE)
+        ]
+        order.nodes[1].actions = [
+            Action(action_id="duplicate", action_type="drop",
+                   blocking_type=Action.NONE)
+        ]
+    else:
+        order.nodes[0].released = False
+
+    is_valid, error = VDA5050Controller.order_msg_is_valid(None, order)
+
+    assert is_valid is False
+    assert error.error_type == "validationOrder"
+    assert expected_description in error.error_description
+    assert error.error_level == error.WARNING
+    assert error.error_references[0].reference_value == order.order_id
+
+
+def test_instant_action_msg_is_valid_accepts_none_blocking_action():
+    instant_actions = InstantActions(
+        actions=[
+            Action(
+                action_id="instant-1",
+                action_type="startPause",
+                blocking_type=Action.NONE,
+            )
+        ]
+    )
+
+    is_valid, error = VDA5050Controller.instant_action_msg_is_valid(
+        None, instant_actions
+    )
+
+    assert is_valid is True
+    assert error.error_description == ""
+
+
+def test_instant_action_msg_is_valid_rejects_non_none_blocking_type():
+    instant_actions = InstantActions(
+        actions=[
+            Action(
+                action_id="instant-1",
+                action_type="startPause",
+                blocking_type=Action.HARD,
+            )
+        ]
+    )
+
+    is_valid, error = VDA5050Controller.instant_action_msg_is_valid(
+        None, instant_actions
+    )
+
+    assert is_valid is False
+    assert error.error_type == "invalidInstantAction"
+    assert error.error_level == error.WARNING
+    assert error.error_references[0].reference_value == "instant-1"
+
+
+def test_instant_action_msg_is_valid_rejects_duplicate_action_ids():
+    instant_actions = InstantActions(
+        actions=[
+            Action(action_id="duplicate", action_type="startPause",
+                   blocking_type=Action.NONE),
+            Action(action_id="duplicate", action_type="stopPause",
+                   blocking_type=Action.NONE),
+        ]
+    )
+
+    is_valid, error = VDA5050Controller.instant_action_msg_is_valid(
+        None, instant_actions
+    )
+
+    assert is_valid is False
+    assert "Duplicate" in error.error_description
+
+
 def get_order_update(order_id=str(uuid4()), order_update_id=0):
     return Order(
         header_id=0,
@@ -516,7 +626,8 @@ def test_vda5050_controller_node_new_order(
 
     rclpy.spin_once(node)
 
-    spy_accept_order.assert_called_once_with(order=order, mode=OrderAcceptModes.NEW)
+    spy_accept_order.assert_called_once_with(
+        order=order, mode=OrderAcceptModes.NEW)
 
     rclpy.spin_once(adapter_node)
 
@@ -648,7 +759,8 @@ def test_vda5050_controller_node_update_order(
     node.process_order(order)
     node._on_active_order()
 
-    spy_accept_order.assert_called_once_with(order=order, mode=OrderAcceptModes.UPDATE)
+    spy_accept_order.assert_called_once_with(
+        order=order, mode=OrderAcceptModes.UPDATE)
 
     # check node states were properly updated
     assert node._current_order == order
@@ -726,7 +838,8 @@ def test_vda5050_controller_node_stitch_order(
     spy_accept_order.reset_mock()
     # Process the stitching order
     node.process_order(stitch_order)
-    spy_accept_order.assert_called_once_with(order=stitch_order, mode=OrderAcceptModes.STITCH)
+    spy_accept_order.assert_called_once_with(
+        order=stitch_order, mode=OrderAcceptModes.STITCH)
 
     assert node._current_state.order_id == stitch_order.order_id
     assert node._current_state.order_update_id == 1
@@ -819,7 +932,8 @@ def test_vda5050_controller_node_reject_order(
 
     spy_reject_order.reset_mock()
 
-    order = get_order_update(order_id, 0)  # Same order id, lower order_update_id
+    # Same order id, lower order_update_id
+    order = get_order_update(order_id, 0)
     node.process_order(order)
 
     spy_reject_order.assert_called_once_with(
@@ -955,7 +1069,8 @@ def test_vda5050_controller_node_new_order_nav_through_nodes(
 
     rclpy.spin_once(node)
 
-    spy_accept_order.assert_called_once_with(order=order, mode=OrderAcceptModes.NEW)
+    spy_accept_order.assert_called_once_with(
+        order=order, mode=OrderAcceptModes.NEW)
 
     rclpy.spin_once(adapter_node)
 
@@ -1080,7 +1195,8 @@ def test_vda5050_controller_node_new_order_nav_through_nodes_unreleased_nodes(
 
     rclpy.spin_once(node)
 
-    spy_accept_order.assert_called_once_with(order=order, mode=OrderAcceptModes.NEW)
+    spy_accept_order.assert_called_once_with(
+        order=order, mode=OrderAcceptModes.NEW)
 
     rclpy.spin_once(adapter_node)
 
@@ -1187,12 +1303,15 @@ def test_vda5050_controller_stitch_while_navigating(
 
     # Mock the extend_nav service client so we don't rely on DDS discovery
     from vda5050_connector.srv import ExtendNavigation
-    mock_extend_response = ExtendNavigation.Response(success=True, message="ok")
+    mock_extend_response = ExtendNavigation.Response(
+        success=True, message="ok")
     mock_extend_future = Future()
     mock_extend_future.set_result(mock_extend_response)
     node._extend_nav_svc_cli = mocker.MagicMock()
-    node._extend_nav_svc_cli.service_is_ready = mocker.MagicMock(return_value=True)
-    node._extend_nav_svc_cli.call_async = mocker.MagicMock(return_value=mock_extend_future)
+    node._extend_nav_svc_cli.service_is_ready = mocker.MagicMock(
+        return_value=True)
+    node._extend_nav_svc_cli.call_async = mocker.MagicMock(
+        return_value=mock_extend_future)
 
     # --- Build a base order with 3 released nodes + 1 unreleased horizon node ---
     order_id = str(uuid4())
@@ -1229,7 +1348,8 @@ def test_vda5050_controller_stitch_while_navigating(
     # Process the base order
     node.process_order(base_order)
     rclpy.spin_once(node)
-    spy_accept_order.assert_called_once_with(order=base_order, mode=OrderAcceptModes.NEW)
+    spy_accept_order.assert_called_once_with(
+        order=base_order, mode=OrderAcceptModes.NEW)
     rclpy.spin_once(adapter_node)
 
     # The controller should navigate through released nodes B and C (2 edges)
@@ -1283,7 +1403,8 @@ def test_vda5050_controller_stitch_while_navigating(
     )
 
     node.process_order(stitch_order)
-    spy_accept_order.assert_called_once_with(order=stitch_order, mode=OrderAcceptModes.STITCH)
+    spy_accept_order.assert_called_once_with(
+        order=stitch_order, mode=OrderAcceptModes.STITCH)
 
     # The controller should NOT send a new navigation goal (would be rejected)
     spy_send_adapter_navigate_through_nodes.assert_not_called()
@@ -1553,7 +1674,8 @@ def test_stitch_no_actions_on_stitch_node(
             Node(node_id="B", sequence_id=2, released=True,
                  node_position=NodePosition(x=1.0, y=0.0, theta=0.0, map_id="map")),
             Node(node_id="C", sequence_id=4, released=True,
-                 node_position=NodePosition(x=2.0, y=0.0, theta=0.0, map_id="map"),
+                 node_position=NodePosition(
+                     x=2.0, y=0.0, theta=0.0, map_id="map"),
                  actions=[node_c_action]),
         ],
         edges=[
