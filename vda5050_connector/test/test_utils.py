@@ -114,7 +114,8 @@ def test_get_vda5050_mqtt_topic_exceptions(test_input, expectation):
 @pytest.mark.parametrize(
     "test_input, expected",
     [
-        ({"manufacturer": "M", "serial_number": "SN", "topic": "order"}, "/uagv/v1/M/SN/order"),
+        ({"manufacturer": "M", "serial_number": "SN",
+         "topic": "order"}, "/uagv/v2/M/SN/order"),
         (
             {
                 "manufacturer": "M",

@@ -510,35 +510,35 @@ def test_vda5050_mqtt_bridge_subscriptions(setup_rclpy, mocker, mock_mqtt_client
     mqtt_bridge = MQTTBridge()
     mqtt_bridge.create_subscription.assert_any_call(
         msg_type=OrderState,
-        topic="/uagv/v1/robots/robot_1/state",
+        topic="/uagv/v2/robots/robot_1/state",
         callback=mqtt_bridge._publish_state,
         qos_profile=10,
     )
     mqtt_bridge.create_subscription.assert_any_call(
         msg_type=Connection,
-        topic="/uagv/v1/robots/robot_1/connection",
+        topic="/uagv/v2/robots/robot_1/connection",
         callback=mqtt_bridge._publish_connection,
         qos_profile=10,
     )
     mqtt_bridge.create_subscription.assert_any_call(
         msg_type=Visualization,
-        topic="/uagv/v1/robots/robot_1/visualization",
+        topic="/uagv/v2/robots/robot_1/visualization",
         callback=mqtt_bridge._publish_visualization,
         qos_profile=10,
     )
     mqtt_bridge.create_subscription.assert_any_call(
         msg_type=Factsheet,
-        topic="/uagv/v1/robots/robot_1/factsheet",
+        topic="/uagv/v2/robots/robot_1/factsheet",
         callback=mqtt_bridge._publish_factsheet,
         qos_profile=10,
     )
 
     mqtt_bridge.create_publisher.assert_any_call(
-        msg_type=Order, topic="/uagv/v1/robots/robot_1/order", qos_profile=10
+        msg_type=Order, topic="/uagv/v2/robots/robot_1/order", qos_profile=10
     )
     mqtt_bridge.create_publisher.assert_any_call(
         msg_type=InstantActions,
-        topic="/uagv/v1/robots/robot_1/instantActions",
+        topic="/uagv/v2/robots/robot_1/instantActions",
         qos_profile=10,
     )
 

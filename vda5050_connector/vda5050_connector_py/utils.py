@@ -284,7 +284,7 @@ def get_vda5050_mqtt_topic(
 
 
 def get_vda5050_ros2_topic(
-    manufacturer, serial_number, topic, interface_name="uagv", major_version="v1"
+    manufacturer, serial_number, topic, interface_name="uagv", major_version="v2"
 ):
     """
     Return ROS2 topics used for communication between controller and adapter.
@@ -302,7 +302,7 @@ def get_vda5050_ros2_topic(
             characters: ``A-Z a-z 0-9 _ - . :``
         topic (string): Subtopic for communication.
         interface_name (str, optional): Name of the used interface. Defaults to "uagv".
-        major_version (str, optional): Major version number, preceded by "v". Defaults to "v1".
+        major_version (str, optional): Major version number, preceded by "v". Defaults to "v2".
 
     Raises
     ------
