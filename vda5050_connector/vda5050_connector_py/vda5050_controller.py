@@ -283,6 +283,8 @@ class VDA5050Controller(Node):
             self._navigate_through_nodes_goal_handle = None
             self._nav_through_nodes_goal_pending = False
             self._nav_through_nodes_last_seq = 0
+            self._nav_through_nodes_extensions_pending = 0
+            self._pending_nav_through_nodes_result = None
         else:
             # Action client for sending NavigateToNode goals to adapter
             self._navigate_to_node_act_cli = ActionClient(
@@ -479,17 +481,20 @@ class VDA5050Controller(Node):
         self._visualization_state_request_pending = True
         try:
             # 使用异步 service，避免单线程执行器等待 adapter 响应时无法处理该响应。
-            future = self._get_adapter_state_svc_cli.call_async(GetState.Request())
+            future = self._get_adapter_state_svc_cli.call_async(
+                GetState.Request())
             future.add_done_callback(self._publish_visualization_after_state)
         except Exception as exc:
             self._visualization_state_request_pending = False
-            self.logger.error(f"Failed to request adapter state for visualization: {exc}")
+            self.logger.error(
+                f"Failed to request adapter state for visualization: {exc}")
 
     def _publish_visualization_after_state(self, future: Future):
         """在 adapter 状态返回后更新并发布 Visualization。"""
         try:
             self._update_state_from_adapter(future.result())
-            self._publish_visualization_to_mc.publish(self._current_visualization)
+            self._publish_visualization_to_mc.publish(
+                self._current_visualization)
         except Exception as exc:
             self.logger.error(f"Failed to publish visualization: {exc}")
         finally:
@@ -1595,6 +1600,7 @@ class VDA5050Controller(Node):
                     req.edges = new_edges
                     req.nodes = [order.nodes[0]] + new_nodes
                     future = self._extend_nav_svc_cli.call_async(req)
+                    self._nav_through_nodes_extensions_pending += 1
                     future.add_done_callback(
                         functools.partial(
                             self._extend_navigation_response_callback,
@@ -2215,6 +2221,11 @@ class VDA5050Controller(Node):
             self._handle_navigation_failure()
             return
 
+        if self._nav_through_nodes_extensions_pending > 0:
+            # 等续接 service 响应后再决定是否派发 fallback goal，避免 adapter 仍持有 Stitch 锁时新 goal 卡在 reset。
+            self._pending_nav_through_nodes_result = future
+            return
+
         # Consume only the nodes/edges that were part of this goal.
         # A stitch may have added new released edges since the goal was sent;
         # those must NOT be consumed here.
@@ -2230,6 +2241,18 @@ class VDA5050Controller(Node):
         released_edges, _ = self._get_drivable_segment()
         if len(released_edges) > 0:
             self._process_next_navigation()
+
+    def _resume_pending_navigation_result(self):
+        """Process a finished nav goal once all in-flight stitch requests have replied."""
+        if self._nav_through_nodes_extensions_pending > 0:
+            return
+
+        future = self._pending_nav_through_nodes_result
+        if future is None:
+            return
+
+        self._pending_nav_through_nodes_result = None
+        self._navigate_through_nodes_result_callback(future)
 
     def _navigate_through_nodes_feedback_callback(self, feedback_msg):
         """
@@ -2274,12 +2297,14 @@ class VDA5050Controller(Node):
         """
         if self._enable_nav_through_nodes:
             return (self._navigate_through_nodes_goal_handle is not None
-                    or self._nav_through_nodes_goal_pending)
+                    or self._nav_through_nodes_goal_pending
+                    or self._nav_through_nodes_extensions_pending > 0)
         return self._navigate_to_node_goal_handle is not None
 
     def _extend_navigation_response_callback(self, last_seq: int, future: Future):
         """Handle the response from the extend_navigation service."""
         result = future.result()
+        self._nav_through_nodes_extensions_pending -= 1
         if result.success:
             self._nav_through_nodes_last_seq = last_seq
             self.logger.info(
@@ -2309,7 +2334,8 @@ class VDA5050Controller(Node):
                     ),
                     VDAErrorReference(
                         reference_key="order_update_id",
-                        reference_value=str(self._current_state.order_update_id),
+                        reference_value=str(
+                            self._current_state.order_update_id),
                     ),
                 ]
                 partial_state["errors"] = self._current_state.errors + [error]
@@ -2324,6 +2350,8 @@ class VDA5050Controller(Node):
 
             if partial_state:
                 self._update_state(partial_state, publish_now=True)
+
+        self._resume_pending_navigation_result()
 
     # Factsheet
 

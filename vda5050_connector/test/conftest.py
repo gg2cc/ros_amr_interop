@@ -229,19 +229,25 @@ def action_server_process_vda_action(adapter_node):
 
 @pytest.fixture
 def service_get_state(adapter_node):
+    def get_state_callback(request, response):
+        return response
+
     return adapter_node.create_service(
         GetState,
         f"/vda5050/robots/robot_1/{DEFAULT_GET_STATE_SVC_NAME}",
-        lambda _: adapter_node.get_logger().info("State request"),
+        get_state_callback,
     )
 
 
 @pytest.fixture
 def service_supported_actions(adapter_node):
+    def supported_actions_callback(request, response):
+        return response
+
     return adapter_node.create_service(
         SupportedActions,
         f"/vda5050/robots/robot_1/{DEFAULT_SUPPORTED_ACTIONS_SVC_NAME}",
-        lambda _: adapter_node.get_logger().info("Supported actions request"),
+        supported_actions_callback,
     )
 
 
@@ -266,9 +272,12 @@ def mock_mqtt_client(mocker):
     fake_rc = 0
     mock = mocker.patch.object(mqtt, "Client")
     mock_mqtt_client = mock.return_value
-    mock_mqtt_client.subscribe = mocker.MagicMock(return_value=(fake_rc, fake_mid))
-    mock_mqtt_client.unsubscribe = mocker.MagicMock(return_value=(fake_rc, fake_mid))
-    mock_mqtt_client.publish = mocker.MagicMock(return_value=(fake_rc, fake_mid))
+    mock_mqtt_client.subscribe = mocker.MagicMock(
+        return_value=(fake_rc, fake_mid))
+    mock_mqtt_client.unsubscribe = mocker.MagicMock(
+        return_value=(fake_rc, fake_mid))
+    mock_mqtt_client.publish = mocker.MagicMock(
+        return_value=(fake_rc, fake_mid))
     mock_mqtt_client.connect.return_value = 0
     mock_mqtt_client.reconnect.return_value = 0
     mock_mqtt_client.disconnect.return_value = 0

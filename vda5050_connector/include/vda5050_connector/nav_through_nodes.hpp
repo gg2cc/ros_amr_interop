@@ -38,6 +38,7 @@
 /**
  * C++ Libraries / header
  */
+#include <mutex>
 #include <shared_mutex>
 
 #include "vda5050_connector/handler.hpp"
@@ -80,6 +81,8 @@ public:
     const std::vector<vda5050_msgs::msg::Node> & nodes_msg,
     const std::shared_ptr<GoalHandleNavigateThroughNodes> goal_handle)
   {
+    // 防止新 goal 在底层续航已接受、connector 尚未提交快照时替换当前 goal。
+    std::lock_guard<std::mutex> extension_lock(extension_mutex_);
     std::unique_lock lock(navigation_mutex_);
     edges_msg_ = edges_msg;
     nodes_msg_ = nodes_msg;
@@ -133,8 +136,8 @@ protected:
   /**
    * @brief Validate an in-flight navigation extension before mutating the goal.
    *
-   * 返回 false 时，续航请求会被拒绝且当前目标保持不变。默认实现保留
-   * 原有 connector 的追加行为，具体导航适配器可按底层能力覆盖此钩子。
+  * 仅在 connector 已验证活动 goal 和 stitch 节点后调用。返回 false 时，
+  * connector 不会提交本地节点/边快照；适配器可在此同步确认底层控制器已接受追加。
    */
   virtual bool validateNavigationExtension(
     const std::vector<vda5050_msgs::msg::Edge> & /*edges*/,
@@ -171,6 +174,8 @@ private:
   std::vector<vda5050_msgs::msg::Edge> edges_msg_;
   std::vector<vda5050_msgs::msg::Node> nodes_msg_;
   mutable std::shared_mutex navigation_mutex_;
+  std::mutex extension_mutex_;
+  rclcpp::CallbackGroup::SharedPtr extend_navigation_callback_group_;
 
   rclcpp::Service<ExtendNavigation>::SharedPtr extend_navigation_srv_;
 

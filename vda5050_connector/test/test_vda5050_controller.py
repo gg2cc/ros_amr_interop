@@ -57,6 +57,15 @@ from vda5050_msgs.msg import CurrentAction
 from vda5050_msgs.msg import OrderState
 
 
+def succeeded_action_result_future(action_type):
+    """Build the GetResult response returned by a successful ROS action goal."""
+    response = action_type.Impl.GetResultService.Response()
+    response.status = 4  # GoalStatus.STATUS_SUCCEEDED
+    future = Future()
+    future.set_result(result=response)
+    return future
+
+
 def get_order_new(order_id=str(uuid4()), order_update_id=0):
     return Order(
         header_id=0,
@@ -298,14 +307,20 @@ def test_failed_navigation_extension_publishes_warning():
     class ControllerStub:
         def __init__(self):
             self.logger = MagicMock()
-            self._current_state = OrderState(order_id="order-1", order_update_id=3)
+            self._current_state = OrderState(
+                order_id="order-1", order_update_id=3)
             self.published_states = []
+            self._nav_through_nodes_extensions_pending = 1
+            self._pending_nav_through_nodes_result = None
 
         def _update_state(self, partial_state, publish_now=False):
             for field, value in partial_state.items():
                 setattr(self._current_state, field, value)
             if publish_now:
                 self.published_states.append(self._current_state)
+
+        def _resume_pending_navigation_result(self):
+            pass
 
     controller = ControllerStub()
     response = ExtendNavigation.Response(
@@ -314,7 +329,8 @@ def test_failed_navigation_extension_publishes_warning():
     )
     future = SimpleNamespace(result=lambda: response)
 
-    VDA5050Controller._extend_navigation_response_callback(controller, 8, future)
+    VDA5050Controller._extend_navigation_response_callback(
+        controller, 8, future)
 
     assert len(controller._current_state.errors) == 1
     error = controller._current_state.errors[0]
@@ -694,8 +710,7 @@ def test_vda5050_controller_node_new_order(
     )
 
     # Future for invoking adapter navigation goal result callback
-    future = Future()
-    future.set_result(result=NavigateToNode.Result())
+    future = succeeded_action_result_future(NavigateToNode)
 
     spy_send_adapter_navigate_to_node.reset_mock()
     # Simulate the adapter reached navigation goal
@@ -777,8 +792,7 @@ def test_vda5050_controller_node_update_order(
     rclpy.spin_once(adapter_node)
 
     # Simulate the adapter reached navigation goals
-    future = Future()
-    future.set_result(result=NavigateToNode.Result())
+    future = succeeded_action_result_future(NavigateToNode)
 
     # The NEW order contains 5 nodes and 4 edges. The first node (in deviation range)
     # is processed and remove, and 4 nodes are send to navigate to.
@@ -825,8 +839,7 @@ def test_vda5050_controller_node_update_order(
     )
 
     # Future for invoking adapter navigation goal result callback
-    future = Future()
-    future.set_result(result=NavigateToNode.Result())
+    future = succeeded_action_result_future(NavigateToNode)
 
     # Simulate the adapter reached navigation goal
     node._navigate_to_node_result_callback(future)
@@ -925,8 +938,7 @@ def test_vda5050_controller_zero_based_stitch_order(
 
     node.process_order(base_order)
 
-    future = Future()
-    future.set_result(result=NavigateToNode.Result())
+    future = succeeded_action_result_future(NavigateToNode)
     node._navigate_to_node_result_callback(future)
 
     node.process_order(stitch_order)
@@ -960,8 +972,7 @@ def test_vda5050_controller_node_reject_order(
     node.process_order(order)
 
     # Simulate the adapter reached navigation goals
-    future = Future()
-    future.set_result(result=NavigateToNode.Result())
+    future = succeeded_action_result_future(NavigateToNode)
 
     # The NEW order contains 5 nodes and 4 edges. The first node (in deviation range)
     # is processed and remove, and 4 nodes are send to navigate to.
@@ -1190,8 +1201,7 @@ def test_vda5050_controller_node_new_order_nav_through_nodes(
     # A feedback message shouldn't be published for the final node in a navigation order
 
     # Simulate the adapter reached navigation goals
-    future = Future()
-    future.set_result(result=NavigateThroughNodes.Result())
+    future = succeeded_action_result_future(NavigateThroughNodes)
     node._navigate_through_nodes_result_callback(future)
 
     spy_process_last_edge_node.assert_called_once()
@@ -1304,8 +1314,7 @@ def test_vda5050_controller_node_new_order_nav_through_nodes_unreleased_nodes(
     # A feedback message shouldn't be published for the final node in a navigation order
 
     # Simulate the adapter reached navigation goals
-    future = Future()
-    future.set_result(result=NavigateThroughNodes.Result())
+    future = succeeded_action_result_future(NavigateThroughNodes)
     node._navigate_through_nodes_result_callback(future)
 
     spy_process_last_edge_node.assert_called_once()
@@ -1321,6 +1330,7 @@ def test_vda5050_controller_node_new_order_nav_through_nodes_unreleased_nodes(
     assert node._current_state.new_base_request is True
 
 
+@pytest.mark.parametrize("extension_success", [True, False])
 def test_vda5050_controller_stitch_while_navigating(
     mocker,
     adapter_node,
@@ -1328,6 +1338,7 @@ def test_vda5050_controller_stitch_while_navigating(
     action_server_process_vda_action,
     service_get_state,
     service_supported_actions,
+    extension_success,
 ):
     """Test that a stitch order arriving mid-navigation extends the in-flight goal
     via ExtendNavigation instead of sending a new nav goal (which would be rejected)."""
@@ -1345,9 +1356,8 @@ def test_vda5050_controller_stitch_while_navigating(
     # Mock the extend_nav service client so we don't rely on DDS discovery
     from vda5050_connector.srv import ExtendNavigation
     mock_extend_response = ExtendNavigation.Response(
-        success=True, message="ok")
+        success=extension_success, message="ok")
     mock_extend_future = Future()
-    mock_extend_future.set_result(mock_extend_response)
     node._extend_nav_svc_cli = mocker.MagicMock()
     node._extend_nav_svc_cli.service_is_ready = mocker.MagicMock(
         return_value=True)
@@ -1460,11 +1470,6 @@ def test_vda5050_controller_stitch_while_navigating(
     assert req.nodes[2].node_id == "E"
     assert len(req.edges) == 2
 
-    # The response callback should have been called (future was pre-resolved)
-    spy_extend_nav.assert_called_once()
-
-    # _nav_through_nodes_last_seq should now cover up to E
-    assert node._nav_through_nodes_last_seq == 8
     assert node._current_state.last_node_id == "B"
     assert node._current_state.last_node_sequence_id == 2
 
@@ -1475,21 +1480,34 @@ def test_vda5050_controller_stitch_while_navigating(
     assert node._current_state.last_node_id == "C"
     assert node._current_state.last_node_sequence_id == 4
 
-    # --- Navigation result arrives (goal finishes at the original last_seq=4,
-    # but we extended to 8, so result callback should consume up to 8) ---
-    # Actually, the result callback consumes up to _nav_through_nodes_last_seq
-    # which is now 8 thanks to the extension.
+    # Simulate the original goal finishing before the STITCH service replies.
     future = Future()
     result_response = NavigateThroughNodes.Impl.GetResultService.Response()
     result_response.status = 4  # GoalStatus.STATUS_SUCCEEDED
     future.set_result(result=result_response)
     node._navigate_through_nodes_result_callback(future)
 
-    # All nodes up to E (seq 8) should now be consumed
-    assert node._current_state.last_node_id == "E"
-    assert node._current_state.last_node_sequence_id == 8
-    assert len(node._current_state.node_states) == 0
-    assert len(node._current_state.edge_states) == 0
+    assert node._pending_nav_through_nodes_result is future
+    assert node._current_state.last_node_id == "C"
+    # A fallback goal must wait until the adapter's extension callback releases its lock.
+    spy_send_adapter_navigate_through_nodes.assert_not_called()
+
+    mock_extend_future.set_result(mock_extend_response)
+    spy_extend_nav.assert_called_once()
+
+    if extension_success:
+        # Successful extension advances the original goal through E.
+        assert node._nav_through_nodes_last_seq == 8
+        assert node._current_state.last_node_id == "E"
+        assert node._current_state.last_node_sequence_id == 8
+        assert len(node._current_state.node_states) == 0
+        assert len(node._current_state.edge_states) == 0
+        spy_send_adapter_navigate_through_nodes.assert_not_called()
+    else:
+        # Rejected extension dispatches the remaining D->E segment only after its response.
+        spy_send_adapter_navigate_through_nodes.assert_called_once()
+        fallback_call = spy_send_adapter_navigate_through_nodes.call_args.kwargs
+        assert [node.node_id for node in fallback_call["nodes"]] == ["D", "E"]
 
 
 def test_vda5050_controller_skipped_feedback_nodes(
