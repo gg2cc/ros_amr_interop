@@ -49,7 +49,7 @@ from vda5050_connector_py.utils import read_str_parameter, read_int_parameter
 from vda5050_connector_py.utils import convert_ros_message_to_json
 from vda5050_connector_py.utils import get_vda5050_ts
 
-from vda5050_connector_py.vda5050_controller import DEFAULT_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS
+from vda5050_connector_py.vda5050_controller import SUPPORTED_PROTOCOL_VERSIONS
 
 # ROS msgs / srvs / actions
 from vda5050_msgs.msg import Action as VDAAction
@@ -70,7 +70,7 @@ NODE_NAME = "mqtt_bridge"
 
 
 def normalize_order_sequence_ids(order):
-    """将 openTCS/KCC 的路径序号转换为 VDA5050 的交替序号。"""
+    """将 openTCS/KCC 的路径序号转换为 VDA5050 的交替序号."""
     nodes = order.get("nodes", [])
     edges = order.get("edges", [])
     if not nodes:
@@ -133,7 +133,8 @@ def generate_vda_order_msg(order):
         if "theta" not in node["node_position"]:
             node["node_position"]["theta"] = 0.0
         else:
-            node["node_position"]["theta"] = float(node["node_position"]["theta"])
+            node["node_position"]["theta"] = float(
+                node["node_position"]["theta"])
         node["node_position"] = VDANodePosition(**node["node_position"])
         for action in node["actions"]:
             if "action_parameters" in action:
@@ -246,29 +247,33 @@ def generate_vda_instant_action_msg(instant_action):
 
 def generate_vda5050_topic_alias(vda_version):
     """
-    Create an alias for the current vda5050 version. The aliases are needed to
-    create the mqtt topics.
+    Create a topic alias for the current VDA5050 version.
+
+    The alias is used to create MQTT topics.
 
     Args:
     ----
         vda_version (string): VDA5050 version with format x.x.x.
 
-    Raises:
+    Raises
     ------
-        ValueError if the alias is not within the supported values.
+        ValueError: If the alias is not within the supported values.
 
     Returns
     -------
         The alias of the version. For example, for the version '2.0.0', the alias is
         'v2'
+
     """
     if vda_version in SUPPORTED_PROTOCOL_VERSIONS:
         return f"v{vda_version[0]}"
     else:
         raise ValueError(
-            f"Invalid protocol major version. Supported versions are: {SUPPORTED_PROTOCOL_VERSIONS},"
+            "Invalid protocol major version. Supported versions are: "
+            f"{SUPPORTED_PROTOCOL_VERSIONS},"
             f"but got {vda_version}"
         )
+
 
 class MQTTBridge(Node):
     """Translates VDA5050 MQTT messages from and to ROS2."""
@@ -285,15 +290,19 @@ class MQTTBridge(Node):
         mqtt_username = read_str_parameter(self, "mqtt_username", "")
         mqtt_password = read_str_parameter(self, "mqtt_password", "")
 
-        self.vda5050_version = read_str_parameter(self, "vda5050_protocol_version", "2.0.0")
-        self.vda5050_version_alias = generate_vda5050_topic_alias(self.vda5050_version)
+        self.vda5050_version = read_str_parameter(
+            self, "vda5050_protocol_version", "2.0.0")
+        self.vda5050_version_alias = generate_vda5050_topic_alias(
+            self.vda5050_version)
 
         self._manufacturer_name = read_str_parameter(
             self, "manufacturer_name", "robots"
         )
-        self._serial_number = read_str_parameter(self, "serial_number", "robot_1")
+        self._serial_number = read_str_parameter(
+            self, "serial_number", "robot_1")
 
-        self._interface_name = read_str_parameter(self, "interface_name", "uagv")
+        self._interface_name = read_str_parameter(
+            self, "interface_name", "uagv")
 
         # Configure MQTT
         self.mqtt_client = mqtt_client.Client()
@@ -361,13 +370,18 @@ class MQTTBridge(Node):
         self.logger.info(f"Node {NODE_NAME} has started successfully.")
 
     def _connect_to_broker(self):
-        """Attempts to connect to the MQTT broker."""
+        """Attempt to connect to the MQTT broker."""
         if not self.mqtt_client.is_connected():
             try:
-                self.mqtt_client.connect_async(host=self._mqtt_address, port=self._mqtt_port)
-                self.logger.info(f"Attempting to connect to MQTT broker at {self._mqtt_address}:{self._mqtt_port}...")
+                self.mqtt_client.connect_async(
+                    host=self._mqtt_address, port=self._mqtt_port)
+                self.logger.info(
+                    f"Attempting to connect to MQTT broker at "
+                    f"{self._mqtt_address}:{self._mqtt_port}..."
+                )
             except Exception as e:
-                self.logger.error(f"Error during connection attempt: {e}. Will retry again.")
+                self.logger.error(
+                    f"Error during connection attempt: {e}. Will retry again.")
                 pass
 
     def on_connect_mqtt(self, client, userdata, flags, rc):
@@ -439,7 +453,8 @@ class MQTTBridge(Node):
                 vda_instant_actions_message = VDAInstantActions(
                     **generate_vda_instant_action_msg(msg_json)
                 )
-                self._instant_actions_pub.publish(msg=vda_instant_actions_message)
+                self._instant_actions_pub.publish(
+                    msg=vda_instant_actions_message)
         except KeyError as ex:
             self.logger.warn(f"Ignoring invalid VDA5050 message: {ex}.")
             return
@@ -586,7 +601,8 @@ class MQTTBridge(Node):
 
         """
         json_msg = convert_ros_message_to_json(msg)
-        self.logger.debug(f"Publishing MQTT message to topic {topic}: {json_msg}")
+        self.logger.debug(
+            f"Publishing MQTT message to topic {topic}: {json_msg}")
         self.mqtt_client.publish(topic, json_msg, qos=qos, retain=retain)
 
     def _publish_state(self, msg: VDAOrderState):

@@ -490,7 +490,7 @@ class VDA5050Controller(Node):
                 f"Failed to request adapter state for visualization: {exc}")
 
     def _publish_visualization_after_state(self, future: Future):
-        """在 adapter 状态返回后更新并发布 Visualization。"""
+        """在 adapter 状态返回后更新并发布 Visualization."""
         try:
             self._update_state_from_adapter(future.result())
             self._publish_visualization_to_mc.publish(
@@ -645,7 +645,9 @@ class VDA5050Controller(Node):
         )
         return action_state.action_status
 
-    def _update_action_status(self, action_id: str, action_status: str, result_description: str = ""):
+    def _update_action_status(
+        self, action_id: str, action_status: str, result_description: str = ""
+    ):
         """
         Update action status on the current state given action's ID.
 
@@ -661,7 +663,7 @@ class VDA5050Controller(Node):
                 ``VDACurrentAction.FAILED``
 
         """
-        # Get action state from current state
+        # Get action state from current state.
         action_state = next(
             (
                 action
@@ -1109,7 +1111,7 @@ class VDA5050Controller(Node):
 
     def _normalize_stitch_sequence_ids(self, order: VDAOrder):
         """
-        兼容调度器在每次订单更新中都从零开始编号的非标准序列。
+        兼容调度器在每次订单更新中都从零开始编号的非标准序列.
 
         MQTT 桥接器会把非标准订单转换为节点 ``0, 2, ...``、边 ``1, 3, ...``。
         对于 stitch 更新，首节点实际上必须继续使用旧订单末节点的全局序号；
@@ -1631,7 +1633,8 @@ class VDA5050Controller(Node):
         if error == OrderRejectErrors.ORDER_UPDATE_ERROR:
             # On orderUpdateError send orderUpdateId and orderId as reference
 
-            # reference_key value is snake_case for ROS2; camelCase conversion for MQTT is done in mqtt_bridge
+            # reference_key is snake_case for ROS 2.
+            # mqtt_bridge converts it to camelCase for MQTT.
             error_references.append(
                 VDAErrorReference(reference_key="order_id",
                                   reference_value=order.order_id)

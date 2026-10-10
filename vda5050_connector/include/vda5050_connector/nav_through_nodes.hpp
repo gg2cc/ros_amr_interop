@@ -141,8 +141,7 @@ protected:
    */
   virtual bool validateNavigationExtension(
     const std::vector<vda5050_msgs::msg::Edge> & /*edges*/,
-    const std::vector<vda5050_msgs::msg::Node> & /*nodes*/,
-    std::string & /*message*/)
+    const std::vector<vda5050_msgs::msg::Node> & /*nodes*/, std::string & /*message*/)
   {
     return true;
   }

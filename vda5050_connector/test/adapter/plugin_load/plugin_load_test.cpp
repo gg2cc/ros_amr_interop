@@ -153,7 +153,8 @@ TEST_P(AdapterThrowTest, HandlerLoadThrows)
 }
 
 // Test each handler case: StateHandler, NavToNode and VDAAction
-INSTANTIATE_TEST_SUITE_P(
+// Foxy vendor GTest 使用旧版 CASE 宏名；Suite 宏在该发行版中不可用。
+INSTANTIATE_TEST_CASE_P(
   HandlerLoadThrowsCases, AdapterThrowTest,
   ::testing::Values(
     vectorParam{rclcpp::Parameter(

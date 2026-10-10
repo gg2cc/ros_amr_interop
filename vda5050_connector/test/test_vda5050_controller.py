@@ -1340,8 +1340,11 @@ def test_vda5050_controller_stitch_while_navigating(
     service_supported_actions,
     extension_success,
 ):
-    """Test that a stitch order arriving mid-navigation extends the in-flight goal
-    via ExtendNavigation instead of sending a new nav goal (which would be rejected)."""
+    """
+    Extend the in-flight navigation goal when a stitch order arrives.
+
+    This should use ExtendNavigation instead of sending a goal that would be rejected.
+    """
     nav_through_nodes_param = Parameter(
         "enable_nav_through_nodes", type_=Parameter.Type.BOOL, value=True)
     node = VDA5050Controller(parameter_overrides=[nav_through_nodes_param])
@@ -1518,8 +1521,11 @@ def test_vda5050_controller_skipped_feedback_nodes(
     service_get_state,
     service_supported_actions,
 ):
-    """Test that when intermediate node feedback is missed (C, D), the result
-    callback still processes each skipped node individually (C, D, E)."""
+    """
+    Process skipped nodes individually when intermediate feedback is missed.
+
+    The result callback must handle nodes C, D, and E in sequence.
+    """
     nav_through_nodes_param = Parameter(
         "enable_nav_through_nodes", type_=Parameter.Type.BOOL, value=True)
     node = VDA5050Controller(parameter_overrides=[nav_through_nodes_param])
@@ -1631,8 +1637,11 @@ def test_stitch_preserves_action_statuses(
     service_get_state,
     service_supported_actions,
 ):
-    """Verify that a stitch preserves existing action statuses (FINISHED/RUNNING)
-    instead of resetting them to WAITING, and only appends truly new actions."""
+    """
+    Preserve action statuses across a stitch update.
+
+    Finished and running actions are retained; only new actions are appended.
+    """
     node = VDA5050Controller()
     node.logger.set_level(LoggingSeverity.DEBUG)
 
@@ -1685,23 +1694,26 @@ def test_stitch_no_actions_on_stitch_node(
     service_get_state,
     service_supported_actions,
 ):
-    """Regression test: stitching when the stitch node has zero actions must not
-    wipe existing action_states (guards against the [:-0] == [:0] == [] bug)."""
+    """
+    Preserve action states when the stitch node has no actions.
+
+    This guards against the ``[:-0] == [:0] == []`` slicing bug.
+    """
     node = VDA5050Controller()
     node.logger.set_level(LoggingSeverity.DEBUG)
 
     order_id = str(uuid4())
 
-    edge_action = Action(
-        action_type="honk", action_id="edge_act_1",
-        action_description="Honk on edge", blocking_type="NONE",
+    node_a_action = Action(
+        action_type="honk", action_id="node_a_act_1",
+        action_description="Honk at node A", blocking_type="NONE",
     )
     node_c_action = Action(
         action_type="dock", action_id="node_c_act_1",
         action_description="Dock at C", blocking_type="NONE",
     )
 
-    # Base order: A(0) --[e1 w/ edge_action]--> B(2) --[e2 unreleased]--> C(4 unreleased)
+    # Base order: A(0 w/ action) --> B(2, stitch node) --> C(4 unreleased)
     # The horizon keeps has_current_order() True after reaching B.
     base_order = Order(
         header_id=0, timestamp=get_vda5050_ts(), version="1.1.1",
@@ -1709,7 +1721,9 @@ def test_stitch_no_actions_on_stitch_node(
         order_id=order_id, order_update_id=0,
         nodes=[
             Node(node_id="A", sequence_id=0, released=True,
-                 node_position=NodePosition(x=0.0, y=0.0, theta=0.0, map_id="map")),
+                 node_position=NodePosition(
+                     x=0.0, y=0.0, theta=0.0, map_id="map"),
+                 actions=[node_a_action]),
             Node(node_id="B", sequence_id=2, released=True,
                  node_position=NodePosition(x=1.0, y=0.0, theta=0.0, map_id="map")),
             Node(node_id="C", sequence_id=4, released=False,
@@ -1717,8 +1731,7 @@ def test_stitch_no_actions_on_stitch_node(
         ],
         edges=[
             Edge(edge_id="e1", sequence_id=1, released=True,
-                 start_node_id="A", end_node_id="B",
-                 actions=[edge_action]),
+                 start_node_id="A", end_node_id="B"),
             Edge(edge_id="e2", sequence_id=3, released=False,
                  start_node_id="B", end_node_id="C"),
         ],
@@ -1749,12 +1762,12 @@ def test_stitch_no_actions_on_stitch_node(
     rclpy.spin_once(adapter_node)
     node._process_last_edge_node()
 
-    # Mark the edge action as FINISHED
-    node._update_action_status(edge_action.action_id, CurrentAction.FINISHED)
+    # Mark the node action as FINISHED
+    node._update_action_status(node_a_action.action_id, CurrentAction.FINISHED)
 
-    # Pre-stitch: 1 action_state (edge_action, FINISHED)
+    # Pre-stitch: 1 action_state (node_a_action, FINISHED)
     assert len(node._current_state.action_states) == 1
-    assert node._current_state.action_states[0].action_id == edge_action.action_id
+    assert node._current_state.action_states[0].action_id == node_a_action.action_id
     assert node._current_state.action_states[0].action_status == CurrentAction.FINISHED
 
     # Process stitch — stitch node B has 0 actions
@@ -1764,5 +1777,5 @@ def test_stitch_no_actions_on_stitch_node(
     # and the new node C's action appended
     assert len(node._current_state.action_states) == 2
     action_map = {a.action_id: a for a in node._current_state.action_states}
-    assert action_map[edge_action.action_id].action_status == CurrentAction.FINISHED
+    assert action_map[node_a_action.action_id].action_status == CurrentAction.FINISHED
     assert action_map[node_c_action.action_id].action_status == CurrentAction.WAITING

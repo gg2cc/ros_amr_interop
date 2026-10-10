@@ -4,13 +4,13 @@ mqtt_bridge:
     mqtt_port: 1883
     mqtt_username: ""
     mqtt_password: ""
-    manufacturer_name: "robots"
+    manufacturer_name: "Huiz"
     serial_number: "robot_1"
 
 controller:
   ros__parameters:
     robot_name: "robot_1"
-    manufacturer_name: "robots"
+    manufacturer_name: "Huiz"
     serial_number: "robot_1"
     # 启用多节点导航 action，使运行中的订单可通过 STITCH 续接。
     enable_nav_through_nodes: true
@@ -18,5 +18,5 @@ controller:
 adapter:
   ros__parameters:
     robot_name: "robot_1"
-    manufacturer_name: "robots"
+    manufacturer_name: "Huiz"
     serial_number: "robot_1"

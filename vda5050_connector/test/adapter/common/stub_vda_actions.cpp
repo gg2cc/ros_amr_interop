@@ -54,8 +54,9 @@ public:
   StubVDAActionSub() = default;
   void configure() override
   {
+    // Foxy 的 rclcpp 订阅回调使用消息智能指针签名，不能把引用类型推导为消息类型。
     vda_action_sub_ = node_->create_subscription<geometry_msgs::msg::Vector3>(
-      "vda_action_sub", 10, [](const geometry_msgs::msg::Vector3 & data) { (void)data; });
+      "vda_action_sub", 10, [](geometry_msgs::msg::Vector3::ConstSharedPtr data) { (void)data; });
   }
   rclcpp::Subscription<geometry_msgs::msg::Vector3>::SharedPtr vda_action_sub_;
 };

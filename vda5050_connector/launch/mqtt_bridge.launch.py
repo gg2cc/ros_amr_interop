@@ -60,7 +60,8 @@ def generate_launch_description():
 
     declare_parameters_config_file_cmd = DeclareLaunchArgument(
         "parameters_config_file",
-        default_value=os.path.join(package_dir, "config", "connector_example.yaml"),
+        default_value=os.path.join(
+            package_dir, "config", "connector_example.yaml"),
         description="Full path to the parameters config file to use",
     )
 
@@ -80,6 +81,7 @@ def generate_launch_description():
         namespace=namespace,
         name="mqtt_bridge",
         parameters=[configured_params],
+        output="screen",
     )
 
     # Create the launch description and populate

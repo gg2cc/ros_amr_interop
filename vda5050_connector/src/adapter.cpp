@@ -85,9 +85,8 @@ void AdapterNode::on_configure()
     plugin_package_, nav_to_node_class_plugin_);
 
   // Create nav through nodes pluginlib loader
-  nav_through_nodes_loader_ =
-    std::make_unique<pluginlib::ClassLoader<adapter::NavThroughNodes>>(
-      plugin_package_, nav_through_nodes_class_plugin_);
+  nav_through_nodes_loader_ = std::make_unique<pluginlib::ClassLoader<adapter::NavThroughNodes>>(
+    plugin_package_, nav_through_nodes_class_plugin_);
 
   std::string base_interface_name = std::string(get_namespace()) + "/";
   base_interface_name += manufacturer_name_ + std::string("/");
@@ -323,7 +322,8 @@ void AdapterNode::execute_nav_through_nodes(
   const std::shared_ptr<GoalHandleNavigateThroughNodes> goal_handle)
 {
   try {
-    nav_through_nodes_->reset(goal_handle->get_goal()->edges, goal_handle->get_goal()->nodes, goal_handle);
+    nav_through_nodes_->reset(
+      goal_handle->get_goal()->edges, goal_handle->get_goal()->nodes, goal_handle);
     nav_through_nodes_->execute();
   } catch (const std::exception & e) {
     RCLCPP_ERROR(get_logger(), "Error while navigating through nodes: [%s].", e.what());
@@ -412,8 +412,7 @@ rclcpp_action::GoalResponse AdapterNode::nav_to_node_handle_goal(
   RCLCPP_INFO(get_logger(), "Received navigation goal request with ID [%d].", uuid.at(0));
 
   if (!nav_to_node_) {
-    RCLCPP_ERROR(
-      get_logger(), "Navigation goal [%d] rejected: no handler configured.", uuid.at(0));
+    RCLCPP_ERROR(get_logger(), "Navigation goal [%d] rejected: no handler configured.", uuid.at(0));
     return rclcpp_action::GoalResponse::REJECT;
   }
 
@@ -462,11 +461,13 @@ rclcpp_action::GoalResponse AdapterNode::nav_through_nodes_handle_goal(
   std::shared_ptr<const NavigateThroughNodes::Goal> goal) const
 {
   (void)goal;
-  RCLCPP_INFO(get_logger(), "Received navigation through nodes goal request with ID [%d].", uuid.at(0));
+  RCLCPP_INFO(
+    get_logger(), "Received navigation through nodes goal request with ID [%d].", uuid.at(0));
 
   if (!nav_through_nodes_) {
     RCLCPP_ERROR(
-      get_logger(), "Navigation through nodes goal [%d] rejected: no handler configured.", uuid.at(0));
+      get_logger(), "Navigation through nodes goal [%d] rejected: no handler configured.",
+      uuid.at(0));
     return rclcpp_action::GoalResponse::REJECT;
   }
 

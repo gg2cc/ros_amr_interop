@@ -13,7 +13,8 @@
 # limitations under the License.
 
 # Package: nav2_common: https://github.com/ros-planning/navigation2
-# Script link: https://github.com/ros-planning/navigation2/blob/main/nav2_common/nav2_common/launch/rewritten_yaml.py
+# Script link:
+# https://github.com/ros-planning/navigation2/blob/main/nav2_common/nav2_common/launch/rewritten_yaml.py
 
 from typing import Dict
 from typing import List
@@ -93,14 +94,16 @@ class RewrittenYaml(launch.Substitution):
         return ""
 
     def perform(self, context: launch.LaunchContext) -> Text:
-        yaml_filename = launch.utilities.perform_substitutions(context, self.name)
+        yaml_filename = launch.utilities.perform_substitutions(
+            context, self.name)
         rewritten_yaml = tempfile.NamedTemporaryFile(mode="w", delete=False)
         param_rewrites, keys_rewrites = self.resolve_rewrites(context)
         data = yaml.safe_load(open(yaml_filename, "r"))
         self.substitute_params(data, param_rewrites)
         self.substitute_keys(data, keys_rewrites)
         if self.__root_key is not None:
-            root_key = launch.utilities.perform_substitutions(context, self.__root_key)
+            root_key = launch.utilities.perform_substitutions(
+                context, self.__root_key)
             if root_key:
                 data = {root_key: data}
         yaml.dump(data, rewritten_yaml)
