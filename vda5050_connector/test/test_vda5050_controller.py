@@ -31,6 +31,7 @@
 
 import rclpy
 import pytest
+import time
 from rclpy.logging import LoggingSeverity
 from rclpy.task import Future
 from rclpy.parameter import Parameter
@@ -371,6 +372,238 @@ def test_navigation_callbacks_capture_order_generation():
     assert response_callback.keywords["order_generation"] == 7
 
 
+def test_cancel_order_waits_for_pending_navigation_acceptance_once():
+    cancel_action_state = CurrentAction(
+        action_id="cancel-1", action_status=CurrentAction.WAITING)
+    waiting_action_state = CurrentAction(
+        action_id="order-action", action_status=CurrentAction.WAITING)
+    controller = SimpleNamespace(
+        _cancel_action=Action(
+            action_id="cancel-1", action_type="cancelOrder"),
+        _current_state=OrderState(
+            action_states=[cancel_action_state, waiting_action_state]),
+        _current_order=Order(order_id="order-1"),
+        _process_vda_action_goal_handle_dict={},
+        _cancel_started_at=None,
+        _cancel_order_timeout=5.0,
+        _enable_nav_through_nodes=True,
+        _navigate_through_nodes_goal_handle=None,
+        logger=MagicMock(),
+    )
+
+    def get_action_status(action_id):
+        return next(
+            state.action_status for state in controller._current_state.action_states
+            if state.action_id == action_id
+        )
+
+    def update_action_status(action_id, status):
+        action_state = next(
+            state for state in controller._current_state.action_states
+            if state.action_id == action_id
+        )
+        action_state.action_status = status
+
+    controller._get_action_status = get_action_status
+    controller._update_action_status = MagicMock(side_effect=update_action_status)
+    controller._has_current_order = MagicMock(return_value=True)
+    controller._is_navigation_active = MagicMock(return_value=True)
+
+    VDA5050Controller._cancel_order(controller)
+    VDA5050Controller._cancel_order(controller)
+
+    assert cancel_action_state.action_status == CurrentAction.RUNNING
+    assert waiting_action_state.action_status == CurrentAction.FAILED
+    controller._update_action_status.assert_any_call(
+        "cancel-1", CurrentAction.RUNNING)
+    controller._update_action_status.assert_any_call(
+        "order-action", CurrentAction.FAILED)
+    assert controller._update_action_status.call_count == 2
+    assert controller.logger.info.call_count == 1
+
+
+def test_cancel_order_sends_navigation_cancel_once():
+    cancel_goal = MagicMock()
+    cancel_action_state = CurrentAction(
+        action_id="cancel-2", action_status=CurrentAction.WAITING)
+    controller = SimpleNamespace(
+        _cancel_action=Action(
+            action_id="cancel-2", action_type="cancelOrder"),
+        _current_state=OrderState(action_states=[cancel_action_state]),
+        _current_order=Order(order_id="order-2"),
+        _process_vda_action_goal_handle_dict={},
+        _cancel_started_at=None,
+        _cancel_order_timeout=5.0,
+        _enable_nav_through_nodes=True,
+        _navigate_through_nodes_goal_handle=SimpleNamespace(
+            cancel_goal_async=cancel_goal),
+        logger=MagicMock(),
+    )
+    controller._get_action_status = lambda action_id: cancel_action_state.action_status
+
+    def update_action_status(action_id, status):
+        cancel_action_state.action_status = status
+
+    controller._update_action_status = MagicMock(side_effect=update_action_status)
+    controller._has_current_order = MagicMock(return_value=True)
+    controller._is_navigation_active = MagicMock(return_value=True)
+
+    VDA5050Controller._cancel_order(controller)
+    VDA5050Controller._cancel_order(controller)
+
+    cancel_goal.assert_called_once_with()
+
+
+def test_only_one_cancel_order_is_handled_per_order_generation():
+    controller = SimpleNamespace(
+        _cancel_action=None,
+        _cancel_attempted_generation=None,
+        _order_generation=4,
+        _instant_action_ids=set(),
+        _current_state=OrderState(action_states=[]),
+        logger=MagicMock(),
+        _publish_state=MagicMock(),
+        instant_action_msg_is_valid=lambda actions: (True, None),
+    )
+
+    def update_state(partial_state):
+        for field, value in partial_state.items():
+            setattr(controller._current_state, field, value)
+
+    def update_action_status(action_id, status, result_description=""):
+        action_state = next(
+            action for action in controller._current_state.action_states
+            if action.action_id == action_id
+        )
+        action_state.action_status = status
+        if result_description:
+            action_state.result_description = result_description
+
+    controller._update_state = update_state
+    controller._update_action_status = update_action_status
+    cancel_actions = InstantActions(actions=[
+        Action(action_id="cancel-a", action_type="cancelOrder",
+               blocking_type=Action.NONE),
+        Action(action_id="cancel-b", action_type="cancelOrder",
+               blocking_type=Action.NONE),
+    ])
+
+    VDA5050Controller.process_instant_actions(controller, cancel_actions)
+
+    action_states = {
+        action.action_id: action for action in controller._current_state.action_states
+    }
+    assert controller._cancel_action.action_id == "cancel-a"
+    assert controller._cancel_attempted_generation == 4
+    assert action_states["cancel-a"].action_status == CurrentAction.WAITING
+    assert action_states["cancel-b"].action_status == CurrentAction.FAILED
+    assert "already handled" in action_states["cancel-b"].result_description
+    controller._publish_state.assert_called_once_with()
+
+
+def test_cancel_order_times_out_and_is_abandoned():
+    cancel_action = Action(action_id="cancel-timeout", action_type="cancelOrder")
+    controller = SimpleNamespace(
+        _cancel_action=cancel_action,
+        _cancel_started_at=time.monotonic() - 11.0,
+        _cancel_order_timeout=10.0,
+        _get_action_status=MagicMock(return_value=CurrentAction.RUNNING),
+        _update_action_status=MagicMock(),
+        _publish_state=MagicMock(),
+        logger=MagicMock(),
+        _process_vda_action_goal_handle_dict={"still-running": object()},
+        _is_navigation_active=MagicMock(return_value=True),
+    )
+
+    VDA5050Controller._cancel_order(controller)
+
+    controller._update_action_status.assert_called_once_with(
+        "cancel-timeout", CurrentAction.FAILED, "Cancellation timed out.")
+    assert controller._cancel_action is None
+    assert controller._cancel_started_at is None
+    controller._publish_state.assert_called_once_with()
+    controller._is_navigation_active.assert_not_called()
+
+
+def test_visualization_request_timeout_retries_and_ignores_late_response():
+    old_future = SimpleNamespace(add_done_callback=MagicMock())
+    new_future = SimpleNamespace(add_done_callback=MagicMock())
+    state_client = MagicMock()
+    state_client.call_async.side_effect = [old_future, new_future]
+    visualization_publisher = MagicMock()
+    controller = SimpleNamespace(
+        _visualization_state_request_pending=False,
+        _visualization_state_request_started_at=None,
+        _visualization_state_request_generation=0,
+        _visualization_state_timeout=3.0,
+        _current_visualization=SimpleNamespace(header_id=0, timestamp=""),
+        _get_adapter_state_svc_cli=state_client,
+        _publish_visualization_to_mc=visualization_publisher,
+        _update_state_from_adapter=MagicMock(),
+        logger=MagicMock(),
+    )
+    controller._publish_visualization_after_state = (
+        lambda future, request_generation=None:
+        VDA5050Controller._publish_visualization_after_state(
+            controller, future, request_generation=request_generation
+        )
+    )
+
+    VDA5050Controller._publish_visualization(controller)
+    old_callback = old_future.add_done_callback.call_args.args[0]
+    assert controller._visualization_state_request_pending
+
+    controller._visualization_state_request_started_at = time.monotonic() - 4.0
+    VDA5050Controller._publish_visualization(controller)
+    new_callback = new_future.add_done_callback.call_args.args[0]
+
+    assert state_client.call_async.call_count == 2
+    assert controller._visualization_state_request_pending
+    assert controller._visualization_state_request_generation == 2
+
+    late_response = SimpleNamespace(result=MagicMock(return_value="stale-state"))
+    old_callback(late_response)
+    controller._update_state_from_adapter.assert_not_called()
+    assert controller._visualization_state_request_pending
+
+    current_response = SimpleNamespace(result=MagicMock(return_value="current-state"))
+    new_callback(current_response)
+    controller._update_state_from_adapter.assert_called_once_with("current-state")
+    visualization_publisher.publish.assert_called_once_with(
+        controller._current_visualization)
+    assert controller._visualization_state_request_pending is False
+
+
+@pytest.mark.parametrize(
+    ("callback_name", "action_type"),
+    [
+        ("_navigate_to_node_result_callback", NavigateToNode),
+        ("_navigate_through_nodes_result_callback", NavigateThroughNodes),
+    ],
+)
+def test_canceled_navigation_is_not_reported_as_node_arrival(callback_name, action_type):
+    controller = SimpleNamespace(
+        _order_generation=2,
+        _canceling_order=lambda: False,
+        _navigate_to_node_goal_handle=object(),
+        _navigate_to_node_goal_pending=False,
+        _navigate_through_nodes_goal_handle=object(),
+        _handle_navigation_failure=MagicMock(),
+        _get_drivable_segment=MagicMock(),
+        _nav_through_nodes_extensions_pending=0,
+    )
+    callback = getattr(VDA5050Controller, callback_name)
+
+    callback(
+        controller,
+        action_result_future(action_type, GoalStatus.STATUS_CANCELED),
+        order_generation=2,
+    )
+
+    controller._handle_navigation_failure.assert_called_once_with()
+    controller._get_drivable_segment.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected_description"),
     [
@@ -532,11 +765,13 @@ def test_state_request_callback_accepts_action_without_result_description():
     future = SimpleNamespace(result=lambda: adapter_state)
 
     # VDA Action 没有 result_description，回调仍应完成状态合并与发布。
-    VDA5050Controller._get_state_from_adapter_callback(controller, action, future)
+    VDA5050Controller._get_state_from_adapter_callback(
+        controller, action, future)
 
     controller._update_action_status.assert_called_once_with(
         action.action_id, CurrentAction.FINISHED)
-    controller._update_state_from_adapter.assert_called_once_with(adapter_state)
+    controller._update_state_from_adapter.assert_called_once_with(
+        adapter_state)
     controller._publish_state.assert_called_once_with()
 
 

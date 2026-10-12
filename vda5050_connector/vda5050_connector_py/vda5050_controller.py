@@ -37,6 +37,7 @@ from __future__ import annotations
 from enum import Enum
 import itertools
 import functools
+import time
 
 # ROS dependencies / utils
 from rclpy.action import ActionClient
@@ -115,6 +116,8 @@ DEFAULT_STATE_PUB_PERIOD = 5.0  # sec
 DEFAULT_CONNECTION_PUB_PERIOD = 15.0  # sec
 DEFAULT_VISUALIZATION_PUB_PERIOD = 1.0  # sec
 DEFAULT_EXECUTE_ORDER_PERIOD = 0.1  # sec
+DEFAULT_VISUALIZATION_STATE_TIMEOUT = 3.0  # sec
+DEFAULT_CANCEL_ORDER_TIMEOUT = 5.0  # sec
 VALID_OPERATING_MODES = {
     VDAOrderState.AUTOMATIC,
     VDAOrderState.SEMIAUTOMATIC,
@@ -168,6 +171,8 @@ class VDA5050Controller(Node):
         self._read_parameters()
 
         self._cancel_action = None
+        self._cancel_started_at = None
+        self._cancel_attempted_generation = None
         self._instant_action_ids = set()
         self._current_node_actions = []
         self._current_node_goal = None
@@ -198,6 +203,8 @@ class VDA5050Controller(Node):
         )
         # 防止 adapter 状态服务响应较慢时，Visualization 定时器重复堆积请求。
         self._visualization_state_request_pending = False
+        self._visualization_state_request_started_at = None
+        self._visualization_state_request_generation = 0
         self._current_factsheet = VDAFactsheet(
             header_id=0,
             version=self._protocol_version,
@@ -256,6 +263,19 @@ class VDA5050Controller(Node):
         )
         self._visualization_pub_period = read_double_parameter(
             self, "visualization_pub_period", DEFAULT_VISUALIZATION_PUB_PERIOD
+        )
+        self._visualization_state_timeout = max(
+            0.1,
+            read_double_parameter(
+                self, "visualization_state_timeout",
+                DEFAULT_VISUALIZATION_STATE_TIMEOUT,
+            ),
+        )
+        self._cancel_order_timeout = max(
+            0.1,
+            read_double_parameter(
+                self, "cancel_order_timeout", DEFAULT_CANCEL_ORDER_TIMEOUT
+            ),
         )
         self._execute_order_period = read_double_parameter(
             self, "execute_order_period", DEFAULT_EXECUTE_ORDER_PERIOD
@@ -478,23 +498,48 @@ class VDA5050Controller(Node):
     def _publish_visualization(self):
         """Publish the current Visualization msg."""
         if self._visualization_state_request_pending:
-            return
+            request_age = (
+                time.monotonic() - self._visualization_state_request_started_at
+                if self._visualization_state_request_started_at is not None
+                else 0.0
+            )
+            if request_age < self._visualization_state_timeout:
+                return
+            self.logger.warning(
+                "Visualization state request timed out; retrying with a new request."
+            )
+            # 新请求会递增代次，使超时后迟到的响应失效。
+            self._visualization_state_request_pending = False
 
         self._current_visualization.header_id += 1
         self._current_visualization.timestamp = get_vda5050_ts()
+        self._visualization_state_request_generation += 1
+        request_generation = self._visualization_state_request_generation
         self._visualization_state_request_pending = True
+        self._visualization_state_request_started_at = time.monotonic()
         try:
             # 使用异步 service，避免单线程执行器等待 adapter 响应时无法处理该响应。
             future = self._get_adapter_state_svc_cli.call_async(
                 GetState.Request())
-            future.add_done_callback(self._publish_visualization_after_state)
+            future.add_done_callback(functools.partial(
+                self._publish_visualization_after_state,
+                request_generation=request_generation,
+            ))
         except Exception as exc:
-            self._visualization_state_request_pending = False
+            if request_generation == self._visualization_state_request_generation:
+                self._visualization_state_request_pending = False
+                self._visualization_state_request_started_at = None
             self.logger.error(
                 f"Failed to request adapter state for visualization: {exc}")
 
-    def _publish_visualization_after_state(self, future: Future):
+    def _publish_visualization_after_state(
+        self, future: Future, request_generation=None
+    ):
         """在 adapter 状态返回后更新并发布 Visualization."""
+        if request_generation is None:
+            request_generation = self._visualization_state_request_generation
+        if request_generation != self._visualization_state_request_generation:
+            return
         try:
             self._update_state_from_adapter(future.result())
             self._publish_visualization_to_mc.publish(
@@ -502,7 +547,9 @@ class VDA5050Controller(Node):
         except Exception as exc:
             self.logger.error(f"Failed to publish visualization: {exc}")
         finally:
-            self._visualization_state_request_pending = False
+            if request_generation == self._visualization_state_request_generation:
+                self._visualization_state_request_pending = False
+                self._visualization_state_request_started_at = None
 
     def _publish_factsheet(self):
         """Publish the current Factsheet msg."""
@@ -703,7 +750,7 @@ class VDA5050Controller(Node):
 
         # If found, update action status and result description
         action_state.action_status = action_status
-        if action_status == VDACurrentAction.FINISHED:
+        if result_description:
             action_state.result_description = result_description
 
     # ---- Adapter's state ----
@@ -744,7 +791,8 @@ class VDA5050Controller(Node):
         """
         if action:
             # Action 不包含 result_description；stateRequest 完成时使用空结果说明。
-            self._update_action_status(action.action_id, VDACurrentAction.FINISHED)
+            self._update_action_status(
+                action.action_id, VDACurrentAction.FINISHED)
         self._update_state_from_adapter(future.result())
         self._publish_state()
 
@@ -839,7 +887,17 @@ class VDA5050Controller(Node):
             )
 
             if action.action_type == "cancelOrder":
-                self._cancel_action = action
+                if self._cancel_attempted_generation == self._order_generation:
+                    self._update_action_status(
+                        action.action_id,
+                        VDACurrentAction.FAILED,
+                        "A cancelOrder action was already handled for this order.",
+                    )
+                    self._publish_state()
+                else:
+                    self._cancel_action = action
+                    self._cancel_attempted_generation = self._order_generation
+                    self._cancel_started_at = time.monotonic()
                 continue
             elif action.action_type == "stateRequest":
                 self._update_action_status(
@@ -1683,7 +1741,29 @@ class VDA5050Controller(Node):
         delete edge_states and node_states, and set to failed waiting action_states.
         When the cancel order action finishes, it publishes the updated state.
         """
-        if not self._has_current_order():
+        cancel_action_status = self._get_action_status(self._cancel_action.action_id)
+        if cancel_action_status == VDACurrentAction.RUNNING:
+            if (
+                self._cancel_started_at is not None
+                and time.monotonic() - self._cancel_started_at >= self._cancel_order_timeout
+            ):
+                self.logger.warning(
+                    f"cancelOrder '{self._cancel_action.action_id}' timed out; "
+                    "abandoning cancellation."
+                )
+                self._update_action_status(
+                    self._cancel_action.action_id,
+                    VDACurrentAction.FAILED,
+                    "Cancellation timed out.",
+                )
+                self._cancel_action = None
+                self._cancel_started_at = None
+                self._publish_state()
+                return
+            # 取消请求已经发出；等待 action 终态，避免每个状态机周期重复发 cancel。
+            if self._process_vda_action_goal_handle_dict or self._is_navigation_active():
+                return
+        elif not self._has_current_order():
             self.logger.error(
                 "cancelOrder action request failed. There is no active order running."
             )
@@ -1708,43 +1788,41 @@ class VDA5050Controller(Node):
             self._update_state({"errors": current_errors})
             self._cancel_action = None
             return
+        else:
+            # 仅首次处理时更新动作状态并发送取消请求。
+            self._update_action_status(
+                self._cancel_action.action_id, VDACurrentAction.RUNNING)
 
-        # Set cancelOrder action state to running
-        self._update_action_status(
-            self._cancel_action.action_id, VDACurrentAction.RUNNING)
+            for action_state in self._current_state.action_states:
+                if action_state.action_status == VDACurrentAction.WAITING:
+                    self._update_action_status(
+                        action_state.action_id, VDACurrentAction.FAILED)
 
-        # Set waiting actions to failed
-        for action_state in self._current_state.action_states:
-            if action_state.action_status == VDACurrentAction.WAITING:
-                self._update_action_status(
-                    action_state.action_id, VDACurrentAction.FAILED)
-
-        # Interrupt any running action
-        vda_action_goal_handles = self._process_vda_action_goal_handle_dict.values()
-        if len(vda_action_goal_handles) > 0:
+            vda_action_goal_handles = list(
+                self._process_vda_action_goal_handle_dict.values())
             for goal_handle in vda_action_goal_handles:
                 goal_handle.cancel_goal_async()
-            return
 
-        # Interrupt any running navigation goal
-        if self._is_navigation_active():
-            if self._enable_nav_through_nodes:
-                if self._navigate_through_nodes_goal_handle is not None:
-                    self._navigate_through_nodes_goal_handle.cancel_goal_async()
-                else:
-                    self.logger.info(
-                        "cancelOrder requested while nav-through-nodes goal is pending acceptance;"
-                        " cancel will be sent once accepted."
-                    )
-            else:
-                if self._navigate_to_node_goal_handle is not None:
+            if self._is_navigation_active():
+                if self._enable_nav_through_nodes:
+                    if self._navigate_through_nodes_goal_handle is not None:
+                        self._navigate_through_nodes_goal_handle.cancel_goal_async()
+                    else:
+                        self.logger.info(
+                            "cancelOrder requested while nav-through-nodes goal is "
+                            "pending acceptance;"
+                            " cancel will be sent once accepted."
+                        )
+                elif self._navigate_to_node_goal_handle is not None:
                     self._navigate_to_node_goal_handle.cancel_goal_async()
                 else:
                     self.logger.info(
                         "cancelOrder requested while navigate-to-node goal is pending "
                         "acceptance; cancel will be sent once accepted."
                     )
-            return
+
+            if vda_action_goal_handles or self._is_navigation_active():
+                return
 
         # Delete remaining node / edge states / clear errors related to the order
         errors = [
@@ -1767,6 +1845,7 @@ class VDA5050Controller(Node):
             self._cancel_action.action_id, VDACurrentAction.FINISHED)
         self._current_order = VDAOrder(order_id="-1")
         self._cancel_action = None
+        self._cancel_started_at = None
         self._current_node_goal = None
         self._current_node_actions = []
 
@@ -2113,13 +2192,14 @@ class VDA5050Controller(Node):
             return
 
         if order_generation != self._order_generation:
-            self.logger.info("Ignoring navigation result from a replaced order.")
+            self.logger.info(
+                "Ignoring navigation result from a replaced order.")
             self._on_active_order()
             return
 
         # Check if goal failed
         status = future.result().status
-        if status == GoalStatus.STATUS_ABORTED:
+        if status in (GoalStatus.STATUS_ABORTED, GoalStatus.STATUS_CANCELED):
             self._handle_navigation_failure()
             return
 
@@ -2295,13 +2375,14 @@ class VDA5050Controller(Node):
                 self._pending_nav_through_nodes_result = future
                 self._pending_nav_through_nodes_generation = order_generation
                 return
-            self.logger.info("Ignoring navigation result from a replaced order.")
+            self.logger.info(
+                "Ignoring navigation result from a replaced order.")
             self._on_active_order()
             return
 
         # Check if goal failed
         status = future.result().status
-        if status == GoalStatus.STATUS_ABORTED:
+        if status in (GoalStatus.STATUS_ABORTED, GoalStatus.STATUS_CANCELED):
             self._handle_navigation_failure()
             return
 
