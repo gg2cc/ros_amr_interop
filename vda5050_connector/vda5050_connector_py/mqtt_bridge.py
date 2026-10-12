@@ -70,7 +70,7 @@ NODE_NAME = "mqtt_bridge"
 
 
 def normalize_order_sequence_ids(order):
-    """将 openTCS/KCC 的路径序号转换为 VDA5050 的交替序号."""
+    """将非 VDA5050 路径序号转换为节点偶数、边奇数的交替序号."""
     nodes = order.get("nodes", [])
     edges = order.get("edges", [])
     if not nodes:
@@ -81,14 +81,19 @@ def normalize_order_sequence_ids(order):
     if len(node_index) != len(node_ids) or any(node_id is None for node_id in node_ids):
         return False
 
-    standard_nodes = all(
-        node.get("sequence_id") == index * 2
-        for index, node in enumerate(nodes)
+    first_sequence_id = nodes[0].get("sequence_id")
+    standard_nodes = (
+        isinstance(first_sequence_id, int)
+        and first_sequence_id % 2 == 0
+        and all(
+            node.get("sequence_id") == first_sequence_id + index * 2
+            for index, node in enumerate(nodes)
+        )
     )
     standard_edges = all(
-        edge.get("sequence_id") == index * 2 + 1
+        edge.get("sequence_id") == first_sequence_id + index * 2 + 1
         for index, edge in enumerate(edges)
-    )
+    ) if standard_nodes else False
     if standard_nodes and standard_edges:
         return False
 

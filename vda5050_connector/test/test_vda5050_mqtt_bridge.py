@@ -38,6 +38,7 @@ import json
 
 from vda5050_connector_py.utils import get_vda5050_ts
 from vda5050_connector_py.mqtt_bridge import generate_vda_order_msg
+from vda5050_connector_py.mqtt_bridge import normalize_order_sequence_ids
 from vda5050_connector_py.mqtt_bridge import generate_vda_instant_action_msg
 from vda5050_connector_py.mqtt_bridge import MQTTBridge
 from vda5050_connector_py.utils import convert_ros_message_to_json
@@ -369,6 +370,25 @@ def test_vda5050_mqtt_bridge_generate_vda_order_msg(mocker):
     assert edge_3.start_node_id == "node3"
     assert edge_3.end_node_id == "node4"
     assert edge_3.actions == []
+
+
+def test_vda5050_mqtt_bridge_preserves_nonzero_stitch_sequence_ids():
+    order = get_order()
+    order["nodes"] = order["nodes"][1:3]
+    order["nodes"][0]["node_id"] = "P2"
+    order["nodes"][1]["node_id"] = "P1"
+    order["edges"] = [order["edges"][1]]
+    order["edges"][0]["edge_id"] = "C6"
+    order["edges"][0]["start_node_id"] = "P2"
+    order["edges"][0]["end_node_id"] = "P1"
+
+    assert normalize_order_sequence_ids(order) is False
+    assert [node["sequence_id"] for node in order["nodes"]] == [2, 4]
+    assert [edge["sequence_id"] for edge in order["edges"]] == [3]
+
+    converted_order = generate_vda_order_msg(order)
+    assert [node.sequence_id for node in converted_order["nodes"]] == [2, 4]
+    assert [edge.sequence_id for edge in converted_order["edges"]] == [3]
 
 
 def test_vda5050_mqtt_bridge_generate_vda_instant_action_msg(mocker):
