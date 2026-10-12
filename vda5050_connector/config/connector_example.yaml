@@ -12,10 +12,10 @@ controller:
     robot_name: "robot_1"
     manufacturer_name: "Huiz"
     serial_number: "robot_1"
+    clear_error_service: "/agv_controller/clear_error"
     # 启用多节点导航 action，使运行中的订单可通过 STITCH 续接。
     enable_nav_through_nodes: true
     visualization_state_timeout: 3.0
-    cancel_order_timeout: 5.0
 
 adapter:
   ros__parameters:

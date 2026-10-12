@@ -56,6 +56,7 @@ from vda5050_msgs.msg import Action
 from vda5050_msgs.msg import ActionParameter
 from vda5050_msgs.msg import InstantActions
 from vda5050_msgs.msg import CurrentAction
+from vda5050_msgs.msg import Error
 from vda5050_msgs.msg import OrderState
 
 
@@ -380,12 +381,11 @@ def test_cancel_order_waits_for_pending_navigation_acceptance_once():
     controller = SimpleNamespace(
         _cancel_action=Action(
             action_id="cancel-1", action_type="cancelOrder"),
+        _cancel_clear_error_pending=False,
         _current_state=OrderState(
             action_states=[cancel_action_state, waiting_action_state]),
         _current_order=Order(order_id="order-1"),
         _process_vda_action_goal_handle_dict={},
-        _cancel_started_at=None,
-        _cancel_order_timeout=5.0,
         _enable_nav_through_nodes=True,
         _navigate_through_nodes_goal_handle=None,
         logger=MagicMock(),
@@ -429,11 +429,10 @@ def test_cancel_order_sends_navigation_cancel_once():
     controller = SimpleNamespace(
         _cancel_action=Action(
             action_id="cancel-2", action_type="cancelOrder"),
+        _cancel_clear_error_pending=False,
         _current_state=OrderState(action_states=[cancel_action_state]),
         _current_order=Order(order_id="order-2"),
         _process_vda_action_goal_handle_dict={},
-        _cancel_started_at=None,
-        _cancel_order_timeout=5.0,
         _enable_nav_through_nodes=True,
         _navigate_through_nodes_goal_handle=SimpleNamespace(
             cancel_goal_async=cancel_goal),
@@ -501,12 +500,11 @@ def test_only_one_cancel_order_is_handled_per_order_generation():
     controller._publish_state.assert_called_once_with()
 
 
-def test_cancel_order_times_out_and_is_abandoned():
-    cancel_action = Action(action_id="cancel-timeout", action_type="cancelOrder")
+def test_cancel_order_waits_for_adapter_confirmation():
+    cancel_action = Action(action_id="cancel-wait", action_type="cancelOrder")
     controller = SimpleNamespace(
         _cancel_action=cancel_action,
-        _cancel_started_at=time.monotonic() - 11.0,
-        _cancel_order_timeout=10.0,
+        _cancel_clear_error_pending=False,
         _get_action_status=MagicMock(return_value=CurrentAction.RUNNING),
         _update_action_status=MagicMock(),
         _publish_state=MagicMock(),
@@ -517,12 +515,187 @@ def test_cancel_order_times_out_and_is_abandoned():
 
     VDA5050Controller._cancel_order(controller)
 
-    controller._update_action_status.assert_called_once_with(
-        "cancel-timeout", CurrentAction.FAILED, "Cancellation timed out.")
-    assert controller._cancel_action is None
-    assert controller._cancel_started_at is None
-    controller._publish_state.assert_called_once_with()
+    assert controller._cancel_action is cancel_action
+    controller._update_action_status.assert_not_called()
+    controller._publish_state.assert_not_called()
     controller._is_navigation_active.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("clear_success", "expected_status", "expected_errors"),
+    [
+        (True, CurrentAction.FINISHED, ["ACTION_FAILED"]),
+        (False, CurrentAction.FINISHED, ["NAVIGATION_ERROR", "ACTION_FAILED"]),
+    ],
+)
+def test_cancel_order_clears_errors_after_navigation_cancel(
+    clear_success, expected_status, expected_errors
+):
+    cancel_action_state = CurrentAction(
+        action_id="cancel-clear", action_status=CurrentAction.RUNNING)
+    navigation_error = Error(error_type="NAVIGATION_ERROR")
+    action_error = Error(error_type="ACTION_FAILED")
+    service_future = SimpleNamespace(add_done_callback=MagicMock())
+    clear_error_client = SimpleNamespace(
+        service_is_ready=MagicMock(return_value=True),
+        call_async=MagicMock(return_value=service_future),
+    )
+    controller = SimpleNamespace(
+        _cancel_action=Action(
+            action_id="cancel-clear", action_type="cancelOrder"),
+        _cancel_clear_error_pending=False,
+        _cancel_action_failed=False,
+        _cancel_action_failure_description="",
+        _current_state=OrderState(
+            action_states=[cancel_action_state],
+            errors=[navigation_error, action_error],
+        ),
+        _process_vda_action_goal_handle_dict={},
+        _is_navigation_active=MagicMock(return_value=False),
+        _clear_error_svc_cli=clear_error_client,
+        _visualization_state_request_generation=3,
+        _visualization_state_request_pending=True,
+        _visualization_state_request_started_at=10.0,
+        _current_order=Order(order_id="order-clear"),
+        _current_node_goal=object(),
+        _current_node_actions=[object()],
+        _publish_state=MagicMock(),
+        logger=MagicMock(),
+    )
+
+    def update_state(partial_state):
+        for field, value in partial_state.items():
+            setattr(controller._current_state, field, value)
+
+    def update_action_status(action_id, status, result_description=""):
+        cancel_action_state.action_status = status
+        cancel_action_state.result_description = result_description
+
+    controller._get_action_status = MagicMock(return_value=CurrentAction.RUNNING)
+    controller._update_state = MagicMock(side_effect=update_state)
+    controller._update_action_status = MagicMock(side_effect=update_action_status)
+    controller._start_cancel_order_error_clear = (
+        lambda: VDA5050Controller._start_cancel_order_error_clear(controller)
+    )
+    controller._cancel_order_error_clear_response_callback = (
+        lambda action_id, future:
+        VDA5050Controller._cancel_order_error_clear_response_callback(
+            controller, action_id, future
+        )
+    )
+    controller._finish_cancel_order = (
+        lambda action_id, clear_succeeded, result_description="":
+        VDA5050Controller._finish_cancel_order(
+            controller, action_id, clear_succeeded, result_description
+        )
+    )
+
+    VDA5050Controller._cancel_order(controller)
+
+    assert controller._cancel_clear_error_pending is True
+    assert controller._cancel_action is not None
+    service_future.add_done_callback.assert_called_once()
+    clear_callback = service_future.add_done_callback.call_args.args[0]
+    response_future = SimpleNamespace(
+        result=lambda: SimpleNamespace(
+            success=clear_success,
+            message="cleared" if clear_success else "still in error",
+        )
+    )
+    clear_callback(response_future)
+
+    assert cancel_action_state.action_status == expected_status
+    assert cancel_action_state.result_description == ""
+    assert [error.error_type for error in controller._current_state.errors] == expected_errors
+    assert controller._cancel_action is None
+    assert controller._cancel_clear_error_pending is False
+    assert controller._current_order.order_id == "-1"
+    expected_generation = 4 if clear_success else 3
+    assert controller._visualization_state_request_generation == expected_generation
+    assert controller._visualization_state_request_pending is (not clear_success)
+    controller._publish_state.assert_called_once_with()
+
+
+@pytest.mark.parametrize("clear_success", [True, False])
+def test_cancel_order_without_active_order_still_clears_errors(clear_success):
+    cancel_action_state = CurrentAction(
+        action_id="cancel-no-order", action_status=CurrentAction.WAITING)
+    navigation_error = Error(error_type="NAVIGATION_ERROR")
+    service_future = SimpleNamespace(add_done_callback=MagicMock())
+    clear_error_client = SimpleNamespace(
+        service_is_ready=MagicMock(return_value=True),
+        call_async=MagicMock(return_value=service_future),
+    )
+    controller = SimpleNamespace(
+        _cancel_action=Action(
+            action_id="cancel-no-order", action_type="cancelOrder"),
+        _cancel_attempted_generation=0,
+        _cancel_clear_error_pending=False,
+        _cancel_action_failed=False,
+        _cancel_action_failure_description="",
+        _order_generation=0,
+        _instant_action_ids={"cancel-no-order"},
+        _current_state=OrderState(
+            action_states=[cancel_action_state],
+            errors=[navigation_error],
+        ),
+        _process_vda_action_goal_handle_dict={},
+        _is_navigation_active=MagicMock(return_value=False),
+        _clear_error_svc_cli=clear_error_client,
+        _visualization_state_request_generation=2,
+        _visualization_state_request_pending=False,
+        _visualization_state_request_started_at=None,
+        _current_order=Order(order_id="-1"),
+        _current_node_goal=None,
+        _current_node_actions=[],
+        _publish_state=MagicMock(),
+        logger=MagicMock(),
+    )
+
+    def update_state(partial_state, publish_now=False):
+        for field, value in partial_state.items():
+            setattr(controller._current_state, field, value)
+
+    def update_action_status(action_id, status, result_description=""):
+        cancel_action_state.action_status = status
+        if result_description:
+            cancel_action_state.result_description = result_description
+
+    controller._get_action_status = lambda action_id: cancel_action_state.action_status
+    controller._has_current_order = MagicMock(return_value=False)
+    controller._update_state = update_state
+    controller._update_action_status = update_action_status
+    controller._start_cancel_order_error_clear = (
+        lambda: VDA5050Controller._start_cancel_order_error_clear(controller)
+    )
+    controller._cancel_order_error_clear_response_callback = (
+        lambda action_id, future:
+        VDA5050Controller._cancel_order_error_clear_response_callback(
+            controller, action_id, future
+        )
+    )
+    controller._finish_cancel_order = (
+        lambda action_id, clear_succeeded, result_description="":
+        VDA5050Controller._finish_cancel_order(
+            controller, action_id, clear_succeeded, result_description
+        )
+    )
+
+    VDA5050Controller._cancel_order(controller)
+
+    assert cancel_action_state.action_status == CurrentAction.FAILED
+    assert cancel_action_state.result_description == "There is no active order running."
+    assert controller._cancel_clear_error_pending is True
+    clear_callback = service_future.add_done_callback.call_args.args[0]
+    clear_callback(SimpleNamespace(result=lambda: SimpleNamespace(
+        success=clear_success,
+        message="No error was active." if clear_success else "Still in error.",
+    )))
+
+    assert cancel_action_state.action_status == CurrentAction.FAILED
+    assert cancel_action_state.result_description == "There is no active order running."
+    assert controller._current_state.errors == ([] if clear_success else [navigation_error])
+    assert controller._cancel_action is None
 
 
 def test_visualization_request_timeout_retries_and_ignores_late_response():

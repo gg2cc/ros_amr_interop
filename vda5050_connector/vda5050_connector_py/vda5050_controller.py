@@ -44,6 +44,7 @@ from rclpy.action import ActionClient
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.node import Node
 from rclpy.task import Future
+from std_srvs.srv import Trigger
 
 from vda5050_connector_py.utils import get_vda5050_ros2_topic
 from vda5050_connector_py.utils import get_vda5050_ts
@@ -108,6 +109,7 @@ DEFAULT_INTERFACE_NAME = "uagv"
 
 DEFAULT_GET_STATE_SVC_NAME = "adapter/get_state"
 DEFAULT_SUPPORTED_ACTIONS_SVC_NAME = "adapter/supported_actions"
+DEFAULT_CLEAR_ERROR_SVC_NAME = "/agv_controller/clear_error"
 DEFAULT_VDA_ACTION_ACT_NAME = "adapter/vda_action"
 DEFAULT_NAV_TO_NODE_ACT_NAME = "adapter/nav_to_node"
 DEFAULT_NAV_THROUGH_NODES_ACT_NAME = "adapter/nav_through_nodes"
@@ -117,7 +119,6 @@ DEFAULT_CONNECTION_PUB_PERIOD = 15.0  # sec
 DEFAULT_VISUALIZATION_PUB_PERIOD = 1.0  # sec
 DEFAULT_EXECUTE_ORDER_PERIOD = 0.1  # sec
 DEFAULT_VISUALIZATION_STATE_TIMEOUT = 3.0  # sec
-DEFAULT_CANCEL_ORDER_TIMEOUT = 5.0  # sec
 VALID_OPERATING_MODES = {
     VDAOrderState.AUTOMATIC,
     VDAOrderState.SEMIAUTOMATIC,
@@ -171,8 +172,10 @@ class VDA5050Controller(Node):
         self._read_parameters()
 
         self._cancel_action = None
-        self._cancel_started_at = None
         self._cancel_attempted_generation = None
+        self._cancel_clear_error_pending = False
+        self._cancel_action_failed = False
+        self._cancel_action_failure_description = ""
         self._instant_action_ids = set()
         self._current_node_actions = []
         self._current_node_goal = None
@@ -245,6 +248,9 @@ class VDA5050Controller(Node):
         self._supported_actions_svc_name = read_str_parameter(
             self, "supported_actions_svc_name", DEFAULT_SUPPORTED_ACTIONS_SVC_NAME
         )
+        self._clear_error_svc_name = read_str_parameter(
+            self, "clear_error_service", DEFAULT_CLEAR_ERROR_SVC_NAME
+        )
         self._vda_action_act_name = read_str_parameter(
             self, "vda_action_act_name", DEFAULT_VDA_ACTION_ACT_NAME
         )
@@ -269,12 +275,6 @@ class VDA5050Controller(Node):
             read_double_parameter(
                 self, "visualization_state_timeout",
                 DEFAULT_VISUALIZATION_STATE_TIMEOUT,
-            ),
-        )
-        self._cancel_order_timeout = max(
-            0.1,
-            read_double_parameter(
-                self, "cancel_order_timeout", DEFAULT_CANCEL_ORDER_TIMEOUT
             ),
         )
         self._execute_order_period = read_double_parameter(
@@ -358,6 +358,12 @@ class VDA5050Controller(Node):
         while not self._supported_actions_svc_cli.wait_for_service(timeout_sec=1.0):
             self.logger.error(
                 "SupportedActions adapter service not available, waiting again...")
+
+        self._clear_error_svc_cli = self.create_client(
+            Trigger,
+            self._clear_error_svc_name,
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
 
         # Service client to extend an in-flight navigation goal (nav_through_nodes only)
         if self._enable_nav_through_nodes:
@@ -897,7 +903,9 @@ class VDA5050Controller(Node):
                 else:
                     self._cancel_action = action
                     self._cancel_attempted_generation = self._order_generation
-                    self._cancel_started_at = time.monotonic()
+                    self._cancel_clear_error_pending = False
+                    self._cancel_action_failed = False
+                    self._cancel_action_failure_description = ""
                 continue
             elif action.action_type == "stateRequest":
                 self._update_action_status(
@@ -1741,34 +1749,29 @@ class VDA5050Controller(Node):
         delete edge_states and node_states, and set to failed waiting action_states.
         When the cancel order action finishes, it publishes the updated state.
         """
+        if self._cancel_clear_error_pending:
+            return
+
         cancel_action_status = self._get_action_status(self._cancel_action.action_id)
         if cancel_action_status == VDACurrentAction.RUNNING:
+            # 先等待导航取消完成，再处理 clear_error service 的异步响应。
             if (
-                self._cancel_started_at is not None
-                and time.monotonic() - self._cancel_started_at >= self._cancel_order_timeout
+                self._cancel_clear_error_pending
+                or self._process_vda_action_goal_handle_dict
+                or self._is_navigation_active()
             ):
-                self.logger.warning(
-                    f"cancelOrder '{self._cancel_action.action_id}' timed out; "
-                    "abandoning cancellation."
-                )
-                self._update_action_status(
-                    self._cancel_action.action_id,
-                    VDACurrentAction.FAILED,
-                    "Cancellation timed out.",
-                )
-                self._cancel_action = None
-                self._cancel_started_at = None
-                self._publish_state()
-                return
-            # 取消请求已经发出；等待 action 终态，避免每个状态机周期重复发 cancel。
-            if self._process_vda_action_goal_handle_dict or self._is_navigation_active():
                 return
         elif not self._has_current_order():
             self.logger.error(
                 "cancelOrder action request failed. There is no active order running."
             )
             self._update_action_status(
-                self._cancel_action.action_id, VDACurrentAction.FAILED)
+                self._cancel_action.action_id,
+                VDACurrentAction.FAILED,
+                "There is no active order running.",
+            )
+            self._cancel_action_failed = True
+            self._cancel_action_failure_description = "There is no active order running."
             # The AGV must report a “noOrderToCancel” error with the errorLevel set to warning.
             # The actionId of the instantAction must be passed as an errorReference.
             error = VDAError()
@@ -1786,7 +1789,8 @@ class VDA5050Controller(Node):
             self._update_state(
                 {"errors": current_errors + [error]}, publish_now=True)
             self._update_state({"errors": current_errors})
-            self._cancel_action = None
+            # 即使订单取消本身失败，也继续尝试清除可复位的底层导航错误。
+            self._start_cancel_order_error_clear()
             return
         else:
             # 仅首次处理时更新动作状态并发送取消请求。
@@ -1824,15 +1828,80 @@ class VDA5050Controller(Node):
             if vda_action_goal_handles or self._is_navigation_active():
                 return
 
-        # Delete remaining node / edge states / clear errors related to the order
+        self._start_cancel_order_error_clear()
+
+    def _start_cancel_order_error_clear(self):
+        """在导航取消完成后请求底层清错，并避免重复提交 service 请求。"""
+        if self._cancel_action is None or self._cancel_clear_error_pending:
+            return
+
+        cancel_action_id = self._cancel_action.action_id
+        if not self._clear_error_svc_cli.service_is_ready():
+            self._finish_cancel_order(
+                cancel_action_id,
+                clear_succeeded=False,
+                result_description="Navigation error clear service is unavailable.",
+            )
+            return
+
+        self._cancel_clear_error_pending = True
+        try:
+            future = self._clear_error_svc_cli.call_async(Trigger.Request())
+            future.add_done_callback(functools.partial(
+                self._cancel_order_error_clear_response_callback,
+                cancel_action_id,
+            ))
+        except Exception as exc:
+            self._finish_cancel_order(
+                cancel_action_id,
+                clear_succeeded=False,
+                result_description=f"Failed to request navigation error reset: {exc}",
+            )
+
+    def _cancel_order_error_clear_response_callback(
+        self, cancel_action_id: str, future: Future
+    ):
+        """根据底层 clear_error service 结果完成对应的 cancelOrder。"""
+        if self._cancel_action is None or self._cancel_action.action_id != cancel_action_id:
+            return
+
+        try:
+            response = future.result()
+            clear_succeeded = response.success
+            result_description = response.message
+        except Exception as exc:
+            clear_succeeded = False
+            result_description = f"Navigation error reset response failed: {exc}"
+
+        self._finish_cancel_order(
+            cancel_action_id,
+            clear_succeeded=clear_succeeded,
+            result_description=result_description,
+        )
+
+    def _finish_cancel_order(
+        self,
+        cancel_action_id: str,
+        clear_succeeded: bool,
+        result_description: str = "",
+    ):
+        """清理订单；只在底层确认清错成功后移除导航错误。"""
+        if self._cancel_action is None or self._cancel_action.action_id != cancel_action_id:
+            return
+
         errors = [
             error
             for error in self._current_state.errors
             if error.error_type not in [e.value for e in OrderRejectErrors]
+            and not (
+                clear_succeeded
+                and error.error_type in {
+                    "NAVIGATION_ERROR", "PROTECTIVE_STOP", "EMERGENCY_STOP"
+                }
+            )
         ]
 
-        # Once all the VDA actions and navigation goal requests have finished,
-        # the cancel order will be mark as finished
+        # 清理已取消订单的路径状态；底层清错失败时保留其错误供调度/操作员处理。
         self._update_state(
             {
                 "errors": errors,
@@ -1841,15 +1910,42 @@ class VDA5050Controller(Node):
                 "edge_states": [],
             }
         )
+        action_status = (
+            VDACurrentAction.FAILED
+            if self._cancel_action_failed
+            else VDACurrentAction.FINISHED
+        )
+        final_result_description = (
+            self._cancel_action_failure_description
+            if self._cancel_action_failed
+            else ""
+        )
+
         self._update_action_status(
-            self._cancel_action.action_id, VDACurrentAction.FINISHED)
+            cancel_action_id,
+            action_status,
+            final_result_description,
+        )
         self._current_order = VDAOrder(order_id="-1")
         self._cancel_action = None
-        self._cancel_started_at = None
+        self._cancel_clear_error_pending = False
+        self._cancel_action_failed = False
+        self._cancel_action_failure_description = ""
         self._current_node_goal = None
         self._current_node_actions = []
+        if clear_succeeded:
+            # 丢弃清错前可能仍在途的 GetState 响应；后续 Visualization 会重新取状态。
+            self._visualization_state_request_generation += 1
+            self._visualization_state_request_pending = False
+            self._visualization_state_request_started_at = None
+        self._publish_state()
 
-        self.logger.info("Finished executing cancelOrder.")
+        if clear_succeeded:
+            self.logger.info("Finished cancelOrder and cleared navigation errors.")
+        else:
+            self.logger.error(
+                f"Failed to clear navigation errors after cancelOrder: {result_description}"
+            )
 
     def _canceling_order(self) -> bool:
         """

@@ -20,6 +20,7 @@
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
   <depend>rclpy</depend>
+  <exec_depend>std_srvs</exec_depend>
   <depend>tf2</depend>
 
   <depend>python3-paho-mqtt</depend>
