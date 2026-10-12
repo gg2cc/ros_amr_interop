@@ -171,6 +171,8 @@ class VDA5050Controller(Node):
         self._instant_action_ids = set()
         self._current_node_actions = []
         self._current_node_goal = None
+        # 新订单切换时递增，用于隔离旧导航 action 的异步回调。
+        self._order_generation = 0
         self._current_order = VDAOrder(order_id="-1")
         self._current_state = VDAOrderState(
             header_id=0,
@@ -285,6 +287,7 @@ class VDA5050Controller(Node):
             self._nav_through_nodes_last_seq = 0
             self._nav_through_nodes_extensions_pending = 0
             self._pending_nav_through_nodes_result = None
+            self._pending_nav_through_nodes_generation = None
         else:
             # Action client for sending NavigateToNode goals to adapter
             self._navigate_to_node_act_cli = ActionClient(
@@ -297,6 +300,7 @@ class VDA5050Controller(Node):
                     "NavigateToNode adapter action server not available, waiting again..."
                 )
             self._navigate_to_node_goal_handle = None
+            self._navigate_to_node_goal_pending = False
 
         # Action client for sending ProcessVDAAction goals to adapter
         self._process_vda_action_act_cli = ActionClient(
@@ -1331,7 +1335,7 @@ class VDA5050Controller(Node):
                 f" Actions: {running_actions}"
             ), throttle_duration_sec=5)
 
-        return has_running_actions or has_nodes_and_edges
+        return bool(has_running_actions or has_nodes_and_edges)
 
     def _first_node_in_deviation_range(self, order: VDAOrder) -> bool:
         """
@@ -1512,6 +1516,8 @@ class VDA5050Controller(Node):
 
         else:
             # Accept NEW / UPDATE order
+            # NEW/UPDATE 会替换当前订单图；STITCH 保持同一图并延伸在途导航。
+            self._order_generation += 1
             if mode == OrderAcceptModes.NEW:
                 # On new orders, delete action states
                 self._delete_action_states()
@@ -1731,7 +1737,13 @@ class VDA5050Controller(Node):
                         " cancel will be sent once accepted."
                     )
             else:
-                self._navigate_to_node_goal_handle.cancel_goal_async()
+                if self._navigate_to_node_goal_handle is not None:
+                    self._navigate_to_node_goal_handle.cancel_goal_async()
+                else:
+                    self.logger.info(
+                        "cancelOrder requested while navigate-to-node goal is pending "
+                        "acceptance; cancel will be sent once accepted."
+                    )
             return
 
         # Delete remaining node / edge states / clear errors related to the order
@@ -2021,15 +2033,23 @@ class VDA5050Controller(Node):
 
         # Send goal to action server
         self.logger.info("Navigate to node goal request sent.")
+        order_generation = self._order_generation
         self._current_node_goal = node
+        self._navigate_to_node_goal_pending = True
         send_goal_future = self._navigate_to_node_act_cli.send_goal_async(
             goal_msg)
 
         # Register callback to be executed when the goal is accepted
         send_goal_future.add_done_callback(
-            self._navigate_to_node_goal_response_callback)
+            functools.partial(
+                self._navigate_to_node_goal_response_callback,
+                order_generation=order_generation,
+            )
+        )
 
-    def _navigate_to_node_goal_response_callback(self, future: Future):
+    def _navigate_to_node_goal_response_callback(
+        self, future: Future, order_generation=None
+    ):
         """
         Response callback function for navigate to node goal request.
 
@@ -2038,23 +2058,41 @@ class VDA5050Controller(Node):
             future (Future): Action response future.
 
         """
+        if order_generation is None:
+            order_generation = self._order_generation
+        self._navigate_to_node_goal_pending = False
         self._navigate_to_node_goal_handle = future.result()
         if not self._navigate_to_node_goal_handle.accepted:
             self.logger.error(
                 "Navigate to node goal request rejected by adapter. Trying again.")
             self._navigate_to_node_goal_handle = None
-            self._current_node_goal = None
+            if order_generation != self._order_generation:
+                self._on_active_order()
+            else:
+                self._current_node_goal = None
             return
 
         self.logger.info("Navigate to node goal request accepted by adapter.")
+        if self._canceling_order():
+            self.logger.info(
+                "Cancel requested while waiting for navigate-to-node goal acceptance; "
+                "canceling accepted goal now."
+            )
+            self._navigate_to_node_goal_handle.cancel_goal_async()
         # TODO: Execute edge actions
 
         # Add callback to handle action result
         get_result_future = self._navigate_to_node_goal_handle.get_result_async()
         get_result_future.add_done_callback(
-            self._navigate_to_node_result_callback)
+            functools.partial(
+                self._navigate_to_node_result_callback,
+                order_generation=order_generation,
+            )
+        )
 
-    def _navigate_to_node_result_callback(self, future: Future):
+    def _navigate_to_node_result_callback(
+        self, future: Future, order_generation=None
+    ):
         """
         Process VDA actions goal request.
 
@@ -2065,10 +2103,18 @@ class VDA5050Controller(Node):
             future (Future): Action result future.
 
         """
+        if order_generation is None:
+            order_generation = self._order_generation
         self._navigate_to_node_goal_handle = None
+        self._navigate_to_node_goal_pending = False
 
         # When the order is cancelled, this callback should avoid continuing its logic
         if self._canceling_order():
+            return
+
+        if order_generation != self._order_generation:
+            self.logger.info("Ignoring navigation result from a replaced order.")
+            self._on_active_order()
             return
 
         # Check if goal failed
@@ -2157,25 +2203,42 @@ class VDA5050Controller(Node):
         self.logger.info(
             f"Navigate through nodes goal request sent with {len(nodes)} nodes"
             f" and {len(edges)} edges.")
+        order_generation = self._order_generation
         self._current_node_goal = nodes[0]
         self._nav_through_nodes_last_seq = nodes[-1].sequence_id
         self._nav_through_nodes_goal_pending = True
         send_goal_future = self._navigate_through_nodes_act_cli.send_goal_async(
-            goal_msg, feedback_callback=self._navigate_through_nodes_feedback_callback)
+            goal_msg,
+            feedback_callback=functools.partial(
+                self._navigate_through_nodes_feedback_callback,
+                order_generation=order_generation,
+            ),
+        )
 
         # Register callback to be executed when the goal is accepted
         send_goal_future.add_done_callback(
-            self._navigate_through_nodes_goal_response_callback)
+            functools.partial(
+                self._navigate_through_nodes_goal_response_callback,
+                order_generation=order_generation,
+            )
+        )
 
-    def _navigate_through_nodes_goal_response_callback(self, future: Future):
+    def _navigate_through_nodes_goal_response_callback(
+        self, future: Future, order_generation=None
+    ):
         """Response callback function for navigate through nodes goal request."""
+        if order_generation is None:
+            order_generation = self._order_generation
         self._nav_through_nodes_goal_pending = False
         self._navigate_through_nodes_goal_handle = future.result()
         if not self._navigate_through_nodes_goal_handle.accepted:
             self.logger.error(
                 "Navigate through nodes goal request rejected by adapter. Trying again.")
             self._navigate_through_nodes_goal_handle = None
-            self._current_node_goal = None
+            if order_generation != self._order_generation:
+                self._on_active_order()
+            else:
+                self._current_node_goal = None
             return
 
         self.logger.info(
@@ -2190,9 +2253,15 @@ class VDA5050Controller(Node):
 
         get_result_future = self._navigate_through_nodes_goal_handle.get_result_async()
         get_result_future.add_done_callback(
-            self._navigate_through_nodes_result_callback)
+            functools.partial(
+                self._navigate_through_nodes_result_callback,
+                order_generation=order_generation,
+            )
+        )
 
-    def _navigate_through_nodes_result_callback(self, future: Future):
+    def _navigate_through_nodes_result_callback(
+        self, future: Future, order_generation=None
+    ):
         """
         Handle the terminal result for a NavigateThroughNodes action goal.
 
@@ -2211,11 +2280,23 @@ class VDA5050Controller(Node):
         remaining released edges (e.g. from a stitch that arrived after the
         goal's extension window) are dispatched as a new navigation goal.
         """
+        if order_generation is None:
+            order_generation = self._order_generation
         self._navigate_through_nodes_goal_handle = None
 
         # When the order is cancelled, this callback should avoid continuing its logic
         if self._canceling_order():
             self._current_node_goal = None
+            return
+
+        # 新订单可在旧 action 收尾期间接收；旧 action 结果不能推进新订单的序号。
+        if order_generation != self._order_generation:
+            if self._nav_through_nodes_extensions_pending > 0:
+                self._pending_nav_through_nodes_result = future
+                self._pending_nav_through_nodes_generation = order_generation
+                return
+            self.logger.info("Ignoring navigation result from a replaced order.")
+            self._on_active_order()
             return
 
         # Check if goal failed
@@ -2227,6 +2308,7 @@ class VDA5050Controller(Node):
         if self._nav_through_nodes_extensions_pending > 0:
             # 等续接 service 响应后再决定是否派发 fallback goal，避免 adapter 仍持有 Stitch 锁时新 goal 卡在 reset。
             self._pending_nav_through_nodes_result = future
+            self._pending_nav_through_nodes_generation = order_generation
             return
 
         # Consume only the nodes/edges that were part of this goal.
@@ -2250,14 +2332,25 @@ class VDA5050Controller(Node):
         if self._nav_through_nodes_extensions_pending > 0:
             return
 
-        future = self._pending_nav_through_nodes_result
-        if future is None:
+        pending_result = self._pending_nav_through_nodes_result
+        if pending_result is None:
             return
 
         self._pending_nav_through_nodes_result = None
-        self._navigate_through_nodes_result_callback(future)
+        order_generation = self._pending_nav_through_nodes_generation
+        self._pending_nav_through_nodes_generation = None
+        self._navigate_through_nodes_result_callback(
+            pending_result,
+            order_generation=(
+                self._order_generation
+                if order_generation is None
+                else order_generation
+            ),
+        )
 
-    def _navigate_through_nodes_feedback_callback(self, feedback_msg):
+    def _navigate_through_nodes_feedback_callback(
+        self, feedback_msg, order_generation=None
+    ):
         """
         Process the feedback message from the navigate_through_nodes actions.
 
@@ -2269,7 +2362,13 @@ class VDA5050Controller(Node):
             feedback_msg : ROS2 Action Feedback object.
 
         """
-        if self._current_node_goal is None or self._canceling_order():
+        if order_generation is None:
+            order_generation = self._order_generation
+        if (
+            order_generation != self._order_generation
+            or self._current_node_goal is None
+            or self._canceling_order()
+        ):
             return
 
         reported_seq = feedback_msg.feedback.last_node.sequence_id
@@ -2302,7 +2401,10 @@ class VDA5050Controller(Node):
             return (self._navigate_through_nodes_goal_handle is not None
                     or self._nav_through_nodes_goal_pending
                     or self._nav_through_nodes_extensions_pending > 0)
-        return self._navigate_to_node_goal_handle is not None
+        return (
+            self._navigate_to_node_goal_handle is not None
+            or self._navigate_to_node_goal_pending
+        )
 
     def _extend_navigation_response_callback(self, last_seq: int, future: Future):
         """Handle the response from the extend_navigation service."""

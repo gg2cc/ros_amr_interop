@@ -34,6 +34,7 @@ import pytest
 from rclpy.logging import LoggingSeverity
 from rclpy.task import Future
 from rclpy.parameter import Parameter
+from action_msgs.msg import GoalStatus
 
 from uuid import uuid4
 from unittest.mock import MagicMock
@@ -59,8 +60,13 @@ from vda5050_msgs.msg import OrderState
 
 def succeeded_action_result_future(action_type):
     """Build the GetResult response returned by a successful ROS action goal."""
+    return action_result_future(action_type, GoalStatus.STATUS_SUCCEEDED)
+
+
+def action_result_future(action_type, status):
+    """Build a ROS action result future with the requested terminal status."""
     response = action_type.Impl.GetResultService.Response()
-    response.status = 4  # GoalStatus.STATUS_SUCCEEDED
+    response.status = status
     future = Future()
     future.set_result(result=response)
     return future
@@ -194,6 +200,175 @@ def test_order_msg_is_valid_accepts_standard_graph():
 
     assert is_valid is True
     assert error.error_description == ""
+
+
+@pytest.mark.parametrize("active_navigation", [
+    {"_nav_through_nodes_goal_pending": True},
+    {"_navigate_through_nodes_goal_handle": object()},
+    {"_navigate_to_node_goal_handle": object()},
+    {"_pending_nav_through_nodes_result": object()},
+])
+def test_navigation_action_alone_does_not_block_new_order(active_navigation):
+    controller = SimpleNamespace(
+        _canceling_order=lambda: False,
+        _current_state=OrderState(),
+        _instant_action_ids=set(),
+        **active_navigation,
+    )
+
+    assert not VDA5050Controller._has_current_order(controller)
+
+
+@pytest.mark.parametrize(
+    "status", [GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_ABORTED]
+)
+def test_stale_navigation_result_does_not_advance_replacement_order(status):
+    controller = SimpleNamespace(
+        _order_generation=2,
+        _navigate_through_nodes_goal_handle=object(),
+        _canceling_order=lambda: False,
+        _on_active_order=MagicMock(),
+        _process_last_edge_node=MagicMock(),
+        _handle_navigation_failure=MagicMock(),
+        _nav_through_nodes_extensions_pending=0,
+        logger=MagicMock(),
+    )
+    future = action_result_future(NavigateThroughNodes, status)
+
+    VDA5050Controller._navigate_through_nodes_result_callback(
+        controller, future, order_generation=1
+    )
+
+    assert controller._navigate_through_nodes_goal_handle is None
+    controller._process_last_edge_node.assert_not_called()
+    controller._handle_navigation_failure.assert_not_called()
+    controller._on_active_order.assert_called_once_with()
+
+
+def test_stale_navigation_feedback_does_not_advance_replacement_order():
+    controller = SimpleNamespace(
+        _order_generation=2,
+        _current_node_goal=SimpleNamespace(sequence_id=4),
+        _canceling_order=lambda: False,
+        _process_last_edge_node=MagicMock(),
+    )
+    feedback = SimpleNamespace(
+        feedback=SimpleNamespace(
+            last_node=SimpleNamespace(sequence_id=4)
+        )
+    )
+
+    VDA5050Controller._navigate_through_nodes_feedback_callback(
+        controller, feedback, order_generation=1
+    )
+
+    controller._process_last_edge_node.assert_not_called()
+    assert controller._current_node_goal.sequence_id == 4
+
+
+def test_stale_navigation_result_waits_for_pending_stitch_response():
+    controller = SimpleNamespace(
+        _order_generation=2,
+        _navigate_through_nodes_goal_handle=object(),
+        _canceling_order=lambda: False,
+        _on_active_order=MagicMock(),
+        _process_last_edge_node=MagicMock(),
+        _handle_navigation_failure=MagicMock(),
+        _nav_through_nodes_extensions_pending=1,
+        _pending_nav_through_nodes_result=None,
+        _pending_nav_through_nodes_generation=None,
+        logger=MagicMock(),
+    )
+    controller._navigate_through_nodes_result_callback = (
+        lambda future, order_generation=None:
+        VDA5050Controller._navigate_through_nodes_result_callback(
+            controller, future, order_generation=order_generation
+        )
+    )
+    future = succeeded_action_result_future(NavigateThroughNodes)
+
+    VDA5050Controller._navigate_through_nodes_result_callback(
+        controller, future, order_generation=1
+    )
+
+    assert controller._pending_nav_through_nodes_result is future
+    assert controller._pending_nav_through_nodes_generation == 1
+    controller._on_active_order.assert_not_called()
+
+    controller._nav_through_nodes_extensions_pending = 0
+    VDA5050Controller._resume_pending_navigation_result(controller)
+
+    assert controller._pending_nav_through_nodes_result is None
+    controller._process_last_edge_node.assert_not_called()
+    controller._on_active_order.assert_called_once_with()
+
+
+def test_rejected_stale_navigation_goal_reschedules_current_order():
+    controller = SimpleNamespace(
+        _order_generation=2,
+        _nav_through_nodes_goal_pending=True,
+        _navigate_through_nodes_goal_handle=object(),
+        _current_node_goal=object(),
+        _on_active_order=MagicMock(),
+        logger=MagicMock(),
+    )
+    future = Future()
+    future.set_result(result=SimpleNamespace(accepted=False))
+
+    VDA5050Controller._navigate_through_nodes_goal_response_callback(
+        controller, future, order_generation=1
+    )
+
+    assert controller._nav_through_nodes_goal_pending is False
+    assert controller._navigate_through_nodes_goal_handle is None
+    controller._on_active_order.assert_called_once_with()
+
+
+def test_current_navigation_failure_is_still_reported():
+    controller = SimpleNamespace(
+        _order_generation=3,
+        _navigate_through_nodes_goal_handle=object(),
+        _canceling_order=lambda: False,
+        _handle_navigation_failure=MagicMock(),
+        _on_active_order=MagicMock(),
+    )
+
+    VDA5050Controller._navigate_through_nodes_result_callback(
+        controller,
+        action_result_future(NavigateThroughNodes, GoalStatus.STATUS_ABORTED),
+        order_generation=3,
+    )
+
+    controller._handle_navigation_failure.assert_called_once_with()
+    controller._on_active_order.assert_not_called()
+
+
+def test_navigation_callbacks_capture_order_generation():
+    action_client = MagicMock()
+    controller = SimpleNamespace(
+        _navigate_through_nodes_act_cli=action_client,
+        _order_generation=7,
+        _current_node_goal=None,
+        _nav_through_nodes_last_seq=0,
+        _navigate_through_nodes_feedback_callback=MagicMock(),
+        _navigate_through_nodes_goal_response_callback=MagicMock(),
+        logger=MagicMock(),
+    )
+    send_goal_future = SimpleNamespace(add_done_callback=MagicMock())
+    action_client.send_goal_async.return_value = send_goal_future
+
+    VDA5050Controller.send_adapter_navigate_through_nodes(
+        controller,
+        edges=[Edge(edge_id="edge-1", sequence_id=1)],
+        nodes=[Node(node_id="P2", sequence_id=2)],
+    )
+
+    feedback_callback = action_client.send_goal_async.call_args.kwargs[
+        "feedback_callback"
+    ]
+    response_callback = send_goal_future.add_done_callback.call_args.args[0]
+    assert feedback_callback.keywords["order_generation"] == 7
+    assert response_callback.keywords["order_generation"] == 7
 
 
 @pytest.mark.parametrize(
@@ -705,6 +880,7 @@ def test_vda5050_controller_node_new_order(
     order_id = str(uuid4())
     order = get_order_new(order_id)
     node.process_order(order)
+    assert node._order_generation == 1
 
     rclpy.spin_once(node)
 
@@ -841,6 +1017,7 @@ def test_vda5050_controller_node_update_order(
 
     spy_accept_order.assert_called_once_with(
         order=order, mode=OrderAcceptModes.UPDATE)
+    assert node._order_generation == 2
 
     # check node states were properly updated
     assert node._current_order == order
@@ -896,6 +1073,7 @@ def test_vda5050_controller_node_stitch_order(
     [base_order, stitch_order] = get_stitch_orders()
 
     node.process_order(base_order)
+    assert node._order_generation == 1
 
     rclpy.spin_once(node)
     rclpy.spin_once(adapter_node)
@@ -919,6 +1097,8 @@ def test_vda5050_controller_node_stitch_order(
     node.process_order(stitch_order)
     spy_accept_order.assert_called_once_with(
         order=stitch_order, mode=OrderAcceptModes.STITCH)
+    # STITCH 延伸同一订单图，不应使正在执行的导航回调失效。
+    assert node._order_generation == 1
 
     assert node._current_state.order_id == stitch_order.order_id
     assert node._current_state.order_update_id == 1
