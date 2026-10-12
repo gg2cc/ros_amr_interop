@@ -340,6 +340,31 @@ def test_failed_navigation_extension_publishes_warning():
     assert controller.published_states == [controller._current_state]
 
 
+def test_state_request_callback_accepts_action_without_result_description():
+    class ControllerStub:
+        def __init__(self):
+            self._update_action_status = MagicMock()
+            self._update_state_from_adapter = MagicMock()
+            self._publish_state = MagicMock()
+
+    controller = ControllerStub()
+    action = Action(
+        action_id="state-request",
+        action_type="stateRequest",
+        blocking_type=Action.NONE,
+    )
+    adapter_state = object()
+    future = SimpleNamespace(result=lambda: adapter_state)
+
+    # VDA Action 没有 result_description，回调仍应完成状态合并与发布。
+    VDA5050Controller._get_state_from_adapter_callback(controller, action, future)
+
+    controller._update_action_status.assert_called_once_with(
+        action.action_id, CurrentAction.FINISHED)
+    controller._update_state_from_adapter.assert_called_once_with(adapter_state)
+    controller._publish_state.assert_called_once_with()
+
+
 def get_order_update(order_id=str(uuid4()), order_update_id=0):
     return Order(
         header_id=0,

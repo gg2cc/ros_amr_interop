@@ -739,8 +739,8 @@ class VDA5050Controller(Node):
 
         """
         if action:
-            self._update_action_status(
-                action.action_id, VDACurrentAction.FINISHED, action.result_description)
+            # Action 不包含 result_description；stateRequest 完成时使用空结果说明。
+            self._update_action_status(action.action_id, VDACurrentAction.FINISHED)
         self._update_state_from_adapter(future.result())
         self._publish_state()
 
