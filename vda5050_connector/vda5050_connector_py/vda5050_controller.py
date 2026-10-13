@@ -37,6 +37,7 @@ from __future__ import annotations
 from enum import Enum
 import itertools
 import functools
+import threading
 import time
 
 # ROS dependencies / utils
@@ -181,6 +182,7 @@ class VDA5050Controller(Node):
         self._current_node_goal = None
         # 新订单切换时递增，用于隔离旧导航 action 的异步回调。
         self._order_generation = 0
+        self._nav_through_nodes_goal_lock = threading.Lock()
         self._current_order = VDAOrder(order_id="-1")
         self._current_state = VDAOrderState(
             header_id=0,
@@ -304,6 +306,7 @@ class VDA5050Controller(Node):
                 )
             self._navigate_through_nodes_goal_handle = None
             self._nav_through_nodes_goal_pending = False
+            self._nav_through_nodes_goal_order_generation = None
             self._nav_through_nodes_last_seq = 0
             self._nav_through_nodes_extensions_pending = 0
             self._pending_nav_through_nodes_result = None
@@ -1643,6 +1646,13 @@ class VDA5050Controller(Node):
             # Otherwise, the order gets rejected and this method is not called.
             self._process_node(self._current_order.nodes[0])
         elif self._enable_nav_through_nodes and self._is_navigation_active():
+            if not self._is_current_order_navigation_goal():
+                self.logger.info(
+                    "Deferring stitch extension until the current order's navigation goal "
+                    "is active."
+                )
+                return
+
             # Extend the in-flight navigation goal with the newly released
             # segment from the stitch order. Filter out nodes/edges whose
             # sequence_id is already covered by the current goal (up to
@@ -2372,62 +2382,114 @@ class VDA5050Controller(Node):
         goal_msg.edges = edges
         goal_msg.nodes = nodes
 
-        # Wait for NavigateThroughNodes action server to be ready
-        self._navigate_through_nodes_act_cli.wait_for_server()
+        # 在等待 action server 前预留唯一派发权，防止并发 timer 重复发送 goal。
+        with self._nav_through_nodes_goal_lock:
+            if (
+                self._nav_through_nodes_goal_pending
+                or self._navigate_through_nodes_goal_handle is not None
+            ):
+                self.logger.debug(
+                    "Skipping duplicate NavigateThroughNodes goal while another goal is active."
+                )
+                return
 
-        # Send goal to action server
-        self.logger.info(
-            f"Navigate through nodes goal request sent with {len(nodes)} nodes"
-            f" and {len(edges)} edges.")
-        order_generation = self._order_generation
-        self._current_node_goal = nodes[0]
-        self._nav_through_nodes_last_seq = nodes[-1].sequence_id
-        self._nav_through_nodes_goal_pending = True
-        send_goal_future = self._navigate_through_nodes_act_cli.send_goal_async(
-            goal_msg,
-            feedback_callback=functools.partial(
-                self._navigate_through_nodes_feedback_callback,
-                order_generation=order_generation,
-            ),
-        )
+            order_generation = self._order_generation
+            self._current_node_goal = nodes[0]
+            self._nav_through_nodes_last_seq = nodes[-1].sequence_id
+            self._nav_through_nodes_goal_pending = True
+            self._nav_through_nodes_goal_order_generation = order_generation
 
-        # Register callback to be executed when the goal is accepted
-        send_goal_future.add_done_callback(
-            functools.partial(
-                self._navigate_through_nodes_goal_response_callback,
-                order_generation=order_generation,
+        try:
+            self._navigate_through_nodes_act_cli.wait_for_server()
+            self.logger.info(
+                f"Navigate through nodes goal request sent with {len(nodes)} nodes"
+                f" and {len(edges)} edges.")
+            send_goal_future = self._navigate_through_nodes_act_cli.send_goal_async(
+                goal_msg,
+                feedback_callback=functools.partial(
+                    self._navigate_through_nodes_feedback_callback,
+                    order_generation=order_generation,
+                ),
             )
-        )
+            send_goal_future.add_done_callback(
+                functools.partial(
+                    self._navigate_through_nodes_goal_response_callback,
+                    order_generation=order_generation,
+                )
+            )
+        except Exception as exc:
+            with self._nav_through_nodes_goal_lock:
+                if self._nav_through_nodes_goal_order_generation == order_generation:
+                    self._nav_through_nodes_goal_pending = False
+                    self._nav_through_nodes_goal_order_generation = None
+                    self._current_node_goal = None
+            self.logger.error(f"Failed to send NavigateThroughNodes goal: {exc}")
+            if order_generation != self._order_generation:
+                self._on_active_order()
 
     def _navigate_through_nodes_goal_response_callback(
         self, future: Future, order_generation=None
     ):
-        """Response callback function for navigate through nodes goal request."""
+        """处理导航 goal 响应，并避免不同异步响应覆盖共享 goal 状态。"""
         if order_generation is None:
             order_generation = self._order_generation
-        self._nav_through_nodes_goal_pending = False
-        self._navigate_through_nodes_goal_handle = future.result()
-        if not self._navigate_through_nodes_goal_handle.accepted:
+
+        try:
+            goal_handle = future.result()
+        except Exception as exc:
+            with self._nav_through_nodes_goal_lock:
+                is_pending_request = (
+                    self._nav_through_nodes_goal_pending
+                    and self._nav_through_nodes_goal_order_generation == order_generation
+                )
+                if is_pending_request:
+                    self._nav_through_nodes_goal_pending = False
+                    self._nav_through_nodes_goal_order_generation = None
+                    self._current_node_goal = None
+            self.logger.error(f"NavigateThroughNodes goal response failed: {exc}")
+            if order_generation != self._order_generation:
+                self._on_active_order()
+            return
+
+        with self._nav_through_nodes_goal_lock:
+            is_pending_request = (
+                self._nav_through_nodes_goal_pending
+                and self._nav_through_nodes_goal_order_generation == order_generation
+            )
+            if is_pending_request:
+                self._nav_through_nodes_goal_pending = False
+                if goal_handle.accepted:
+                    self._navigate_through_nodes_goal_handle = goal_handle
+                else:
+                    self._navigate_through_nodes_goal_handle = None
+                    self._nav_through_nodes_goal_order_generation = None
+
+        if not is_pending_request:
+            self.logger.info("Ignoring response for a superseded navigation goal request.")
+            if goal_handle.accepted:
+                # A stale accepted goal must not remain untracked in the adapter.
+                goal_handle.cancel_goal_async()
+            return
+
+        if not goal_handle.accepted:
             self.logger.error(
                 "Navigate through nodes goal request rejected by adapter. Trying again.")
-            self._navigate_through_nodes_goal_handle = None
             if order_generation != self._order_generation:
                 self._on_active_order()
             else:
                 self._current_node_goal = None
             return
 
-        self.logger.info(
-            "Navigate through nodes goal request accepted by adapter.")
+        self.logger.info("Navigate through nodes goal request accepted by adapter.")
 
         if self._canceling_order():
             self.logger.info(
                 "Cancel requested while waiting for nav-through-nodes goal acceptance; "
                 "canceling accepted goal now."
             )
-            self._navigate_through_nodes_goal_handle.cancel_goal_async()
+            goal_handle.cancel_goal_async()
 
-        get_result_future = self._navigate_through_nodes_goal_handle.get_result_async()
+        get_result_future = goal_handle.get_result_async()
         get_result_future.add_done_callback(
             functools.partial(
                 self._navigate_through_nodes_result_callback,
@@ -2458,7 +2520,10 @@ class VDA5050Controller(Node):
         """
         if order_generation is None:
             order_generation = self._order_generation
-        self._navigate_through_nodes_goal_handle = None
+        with self._nav_through_nodes_goal_lock:
+            if self._nav_through_nodes_goal_order_generation == order_generation:
+                self._navigate_through_nodes_goal_handle = None
+                self._nav_through_nodes_goal_order_generation = None
 
         # When the order is cancelled, this callback should avoid continuing its logic
         if self._canceling_order():
@@ -2583,6 +2648,13 @@ class VDA5050Controller(Node):
             or self._navigate_to_node_goal_pending
         )
 
+    def _is_current_order_navigation_goal(self) -> bool:
+        """判断已被 Adapter 接受的导航 goal 是否属于当前订单代次。"""
+        return (
+            self._navigate_through_nodes_goal_handle is not None
+            and self._nav_through_nodes_goal_order_generation == self._order_generation
+        )
+
     def _extend_navigation_response_callback(self, last_seq: int, future: Future):
         """Handle the response from the extend_navigation service."""
         result = future.result()
@@ -2596,42 +2668,21 @@ class VDA5050Controller(Node):
                 f"Could not extend navigation: {result.message}. "
                 "Will dispatch new goal when current finishes.")
             description = (
-                "In-flight path extension is unsupported by the AGV controller. "
+                f"Navigation extension deferred by AGV controller: {result.message}. "
                 "The current path will finish before remaining released nodes are dispatched."
             )
-            partial_state = {}
-            if not any(
-                error.error_type == OrderRejectErrors.ORDER_UPDATE_ERROR.value
-                and error.error_description == description
-                for error in self._current_state.errors
-            ):
-                error = VDAError()
-                error.error_type = OrderRejectErrors.ORDER_UPDATE_ERROR.value
-                error.error_description = description
-                error.error_level = VDAError.WARNING
-                error.error_references = [
-                    VDAErrorReference(
-                        reference_key="order_id",
-                        reference_value=self._current_state.order_id,
-                    ),
-                    VDAErrorReference(
-                        reference_key="order_update_id",
-                        reference_value=str(
-                            self._current_state.order_update_id),
-                    ),
-                ]
-                partial_state["errors"] = self._current_state.errors + [error]
-
             info_type = "NAVIGATION_EXTENSION_DEFERRED"
-            if not any(info.info_type == info_type for info in self._current_state.informations):
-                info = VDAInfo()
-                info.info_type = info_type
-                info.info_description = description
-                info.info_level = VDAInfo.INFO
-                partial_state["informations"] = self._current_state.informations + [info]
-
-            if partial_state:
-                self._update_state(partial_state, publish_now=True)
+            info = VDAInfo()
+            info.info_type = info_type
+            info.info_description = description
+            info.info_level = VDAInfo.INFO
+            informations = [
+                existing_info
+                for existing_info in self._current_state.informations
+                if existing_info.info_type != info_type
+            ]
+            informations.append(info)
+            self._update_state({"informations": informations}, publish_now=True)
 
         self._resume_pending_navigation_result()
 

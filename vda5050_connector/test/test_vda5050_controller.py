@@ -31,6 +31,7 @@
 
 import rclpy
 import pytest
+import threading
 import time
 from rclpy.logging import LoggingSeverity
 from rclpy.task import Future
@@ -222,11 +223,36 @@ def test_navigation_action_alone_does_not_block_new_order(active_navigation):
 
 
 @pytest.mark.parametrize(
+    ("goal_order_generation", "has_accepted_goal", "expected"),
+    [
+        (5, True, True),
+        (4, True, False),
+        (5, False, False),
+    ],
+)
+def test_only_accepted_current_order_goal_can_be_extended(
+    goal_order_generation, has_accepted_goal, expected
+):
+    controller = SimpleNamespace(
+        _order_generation=5,
+        _nav_through_nodes_goal_order_generation=goal_order_generation,
+        _navigate_through_nodes_goal_handle=(object() if has_accepted_goal else None),
+    )
+
+    assert (
+        VDA5050Controller._is_current_order_navigation_goal(controller)
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
     "status", [GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_ABORTED]
 )
 def test_stale_navigation_result_does_not_advance_replacement_order(status):
     controller = SimpleNamespace(
         _order_generation=2,
+        _nav_through_nodes_goal_lock=threading.Lock(),
+        _nav_through_nodes_goal_order_generation=1,
         _navigate_through_nodes_goal_handle=object(),
         _canceling_order=lambda: False,
         _on_active_order=MagicMock(),
@@ -271,6 +297,8 @@ def test_stale_navigation_feedback_does_not_advance_replacement_order():
 def test_stale_navigation_result_waits_for_pending_stitch_response():
     controller = SimpleNamespace(
         _order_generation=2,
+        _nav_through_nodes_goal_lock=threading.Lock(),
+        _nav_through_nodes_goal_order_generation=1,
         _navigate_through_nodes_goal_handle=object(),
         _canceling_order=lambda: False,
         _on_active_order=MagicMock(),
@@ -308,6 +336,8 @@ def test_stale_navigation_result_waits_for_pending_stitch_response():
 def test_rejected_stale_navigation_goal_reschedules_current_order():
     controller = SimpleNamespace(
         _order_generation=2,
+        _nav_through_nodes_goal_lock=threading.Lock(),
+        _nav_through_nodes_goal_order_generation=1,
         _nav_through_nodes_goal_pending=True,
         _navigate_through_nodes_goal_handle=object(),
         _current_node_goal=object(),
@@ -329,6 +359,8 @@ def test_rejected_stale_navigation_goal_reschedules_current_order():
 def test_current_navigation_failure_is_still_reported():
     controller = SimpleNamespace(
         _order_generation=3,
+        _nav_through_nodes_goal_lock=threading.Lock(),
+        _nav_through_nodes_goal_order_generation=3,
         _navigate_through_nodes_goal_handle=object(),
         _canceling_order=lambda: False,
         _handle_navigation_failure=MagicMock(),
@@ -345,11 +377,50 @@ def test_current_navigation_failure_is_still_reported():
     controller._on_active_order.assert_not_called()
 
 
+def test_failed_navigation_extension_is_reported_as_information_only():
+    existing_error = Error(error_type="NAVIGATION_ERROR")
+    controller = SimpleNamespace(
+        _nav_through_nodes_extensions_pending=1,
+        _current_state=OrderState(
+            errors=[existing_error],
+            informations=[],
+        ),
+        _resume_pending_navigation_result=MagicMock(),
+        logger=MagicMock(),
+    )
+
+    def update_state(partial_state, publish_now=False):
+        for field, value in partial_state.items():
+            setattr(controller._current_state, field, value)
+
+    controller._update_state = MagicMock(side_effect=update_state)
+    future = SimpleNamespace(result=lambda: SimpleNamespace(
+        success=False,
+        message="AGV is in a segment switch stop transition.",
+    ))
+
+    VDA5050Controller._extend_navigation_response_callback(
+        controller, last_seq=4, future=future
+    )
+
+    assert controller._current_state.errors == [existing_error]
+    assert len(controller._current_state.informations) == 1
+    info = controller._current_state.informations[0]
+    assert info.info_type == "NAVIGATION_EXTENSION_DEFERRED"
+    assert "segment switch stop transition" in info.info_description
+    assert info.info_level == info.INFO
+    controller._resume_pending_navigation_result.assert_called_once_with()
+
+
 def test_navigation_callbacks_capture_order_generation():
     action_client = MagicMock()
     controller = SimpleNamespace(
         _navigate_through_nodes_act_cli=action_client,
         _order_generation=7,
+        _nav_through_nodes_goal_lock=threading.Lock(),
+        _nav_through_nodes_goal_pending=False,
+        _nav_through_nodes_goal_order_generation=None,
+        _navigate_through_nodes_goal_handle=None,
         _current_node_goal=None,
         _nav_through_nodes_last_seq=0,
         _navigate_through_nodes_feedback_callback=MagicMock(),
@@ -371,6 +442,79 @@ def test_navigation_callbacks_capture_order_generation():
     response_callback = send_goal_future.add_done_callback.call_args.args[0]
     assert feedback_callback.keywords["order_generation"] == 7
     assert response_callback.keywords["order_generation"] == 7
+
+
+def test_duplicate_navigation_dispatch_is_reserved_before_waiting_for_server():
+    controller = SimpleNamespace(
+        _nav_through_nodes_goal_lock=threading.Lock(),
+        _nav_through_nodes_goal_pending=False,
+        _nav_through_nodes_goal_order_generation=None,
+        _navigate_through_nodes_goal_handle=None,
+        _order_generation=3,
+        _current_node_goal=None,
+        _nav_through_nodes_last_seq=0,
+        _navigate_through_nodes_feedback_callback=MagicMock(),
+        _navigate_through_nodes_goal_response_callback=MagicMock(),
+        logger=MagicMock(),
+    )
+    action_client = MagicMock()
+    controller._navigate_through_nodes_act_cli = action_client
+    send_goal_future = SimpleNamespace(add_done_callback=MagicMock())
+    action_client.send_goal_async.return_value = send_goal_future
+    edges = [Edge(edge_id="edge-1", sequence_id=1)]
+    nodes = [Node(node_id="P2", sequence_id=2)]
+
+    def dispatch_again_while_waiting():
+        VDA5050Controller.send_adapter_navigate_through_nodes(
+            controller, edges=edges, nodes=nodes
+        )
+        return True
+
+    action_client.wait_for_server.side_effect = dispatch_again_while_waiting
+
+    VDA5050Controller.send_adapter_navigate_through_nodes(
+        controller, edges=edges, nodes=nodes
+    )
+
+    action_client.send_goal_async.assert_called_once()
+    assert controller._nav_through_nodes_goal_pending is True
+
+
+def test_late_rejected_goal_response_does_not_clear_accepted_goal():
+    result_future = SimpleNamespace(add_done_callback=MagicMock())
+    accepted_handle = SimpleNamespace(
+        accepted=True,
+        get_result_async=MagicMock(return_value=result_future),
+    )
+    controller = SimpleNamespace(
+        _order_generation=3,
+        _nav_through_nodes_goal_lock=threading.Lock(),
+        _nav_through_nodes_goal_pending=True,
+        _nav_through_nodes_goal_order_generation=3,
+        _navigate_through_nodes_goal_handle=None,
+        _navigate_through_nodes_result_callback=MagicMock(),
+        _canceling_order=lambda: False,
+        logger=MagicMock(),
+    )
+
+    accepted_future = Future()
+    accepted_future.set_result(result=accepted_handle)
+    VDA5050Controller._navigate_through_nodes_goal_response_callback(
+        controller, accepted_future, order_generation=3
+    )
+
+    assert controller._nav_through_nodes_goal_pending is False
+    assert controller._navigate_through_nodes_goal_handle is accepted_handle
+    result_future.add_done_callback.assert_called_once()
+
+    late_rejected_future = Future()
+    late_rejected_future.set_result(result=SimpleNamespace(accepted=False))
+    VDA5050Controller._navigate_through_nodes_goal_response_callback(
+        controller, late_rejected_future, order_generation=3
+    )
+
+    assert controller._navigate_through_nodes_goal_handle is accepted_handle
+    accepted_handle.get_result_async.assert_called_once()
 
 
 def test_cancel_order_waits_for_pending_navigation_acceptance_once():
@@ -757,6 +901,8 @@ def test_visualization_request_timeout_retries_and_ignores_late_response():
 def test_canceled_navigation_is_not_reported_as_node_arrival(callback_name, action_type):
     controller = SimpleNamespace(
         _order_generation=2,
+        _nav_through_nodes_goal_lock=threading.Lock(),
+        _nav_through_nodes_goal_order_generation=2,
         _canceling_order=lambda: False,
         _navigate_to_node_goal_handle=object(),
         _navigate_to_node_goal_pending=False,
@@ -913,11 +1059,13 @@ def test_failed_navigation_extension_publishes_warning():
     VDA5050Controller._extend_navigation_response_callback(
         controller, 8, future)
 
-    assert len(controller._current_state.errors) == 1
-    error = controller._current_state.errors[0]
-    assert error.error_type == "orderUpdateError"
-    assert error.error_level == error.WARNING
-    assert "current path will finish" in error.error_description
+    assert controller._current_state.errors == []
+    assert len(controller._current_state.informations) == 1
+    info = controller._current_state.informations[0]
+    assert info.info_type == "NAVIGATION_EXTENSION_DEFERRED"
+    assert info.info_level == info.INFO
+    assert "In-flight navigation extension is not supported" in info.info_description
+    assert "current path will finish" in info.info_description
     assert controller.published_states == [controller._current_state]
 
 
@@ -1943,7 +2091,10 @@ def test_vda5050_controller_node_new_order_nav_through_nodes_unreleased_nodes(
     assert node._current_state.new_base_request is True
 
 
-@pytest.mark.parametrize("extension_success", [True, False])
+@pytest.mark.parametrize(
+    ("extension_success", "goal_generation_matches"),
+    [(True, True), (False, True), (True, False)],
+)
 def test_vda5050_controller_stitch_while_navigating(
     mocker,
     adapter_node,
@@ -1952,6 +2103,7 @@ def test_vda5050_controller_stitch_while_navigating(
     service_get_state,
     service_supported_actions,
     extension_success,
+    goal_generation_matches,
 ):
     """
     Extend the in-flight navigation goal when a stitch order arrives.
@@ -2018,12 +2170,20 @@ def test_vda5050_controller_stitch_while_navigating(
     spy_accept_order.assert_called_once_with(
         order=base_order, mode=OrderAcceptModes.NEW)
     rclpy.spin_once(adapter_node)
+    rclpy.spin_once(node)
 
     # The controller should navigate through released nodes B and C (2 edges)
     spy_send_adapter_navigate_through_nodes.assert_called_once_with(
         edges=base_order.edges[:2], nodes=base_order.nodes[1:3]
     )
     assert node._nav_through_nodes_last_seq == 4  # seq of node C
+    # 本测试将 fake Adapter 的已接受 goal 作为在途续接前提。
+    node._navigate_through_nodes_goal_handle = object()
+    node._nav_through_nodes_goal_order_generation = (
+        node._order_generation
+        if goal_generation_matches
+        else node._order_generation - 1
+    )
 
     assert node._current_state.last_node_id == "A"
     assert node._current_state.last_node_sequence_id == 0
@@ -2072,6 +2232,13 @@ def test_vda5050_controller_stitch_while_navigating(
     node.process_order(stitch_order)
     spy_accept_order.assert_called_once_with(
         order=stitch_order, mode=OrderAcceptModes.STITCH)
+
+    if not goal_generation_matches:
+        # 旧订单 goal 仍在途时不应把新订单更新续接到它上面。
+        node._extend_nav_svc_cli.call_async.assert_not_called()
+        spy_send_adapter_navigate_through_nodes.assert_not_called()
+        assert node._current_order.order_update_id == 1
+        return
 
     # The controller should NOT send a new navigation goal (would be rejected)
     spy_send_adapter_navigate_through_nodes.assert_not_called()
