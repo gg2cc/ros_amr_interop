@@ -223,6 +223,38 @@ def test_navigation_action_alone_does_not_block_new_order(active_navigation):
 
 
 @pytest.mark.parametrize(
+    ("active_order", "expected_last_node_id"),
+    [(False, "P2"), (True, "P1")],
+)
+def test_adapter_last_node_updates_only_when_no_order_is_active(
+    active_order, expected_last_node_id
+):
+    controller = SimpleNamespace(
+        _current_state=OrderState(
+            order_id="finished-order",
+            last_node_id="P1",
+            last_node_sequence_id=16,
+            errors=[],
+            informations=[],
+        ),
+        _current_visualization=SimpleNamespace(),
+        _has_current_order=lambda: active_order,
+    )
+    controller._update_state = lambda partial_state: [
+        setattr(controller._current_state, field, value)
+        for field, value in partial_state.items()
+    ]
+    adapter_state = SimpleNamespace(
+        state=OrderState(last_node_id="P2", operating_mode="AUTOMATIC")
+    )
+
+    VDA5050Controller._update_state_from_adapter(controller, adapter_state)
+
+    assert controller._current_state.last_node_id == expected_last_node_id
+    assert controller._current_state.last_node_sequence_id == 16
+
+
+@pytest.mark.parametrize(
     ("goal_order_generation", "has_accepted_goal", "expected"),
     [
         (5, True, True),

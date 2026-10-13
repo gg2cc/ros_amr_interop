@@ -825,24 +825,26 @@ class VDA5050Controller(Node):
             in [e.value for e in OrderRejectErrors] + [e.value for e in ActionErrors]
         ]
         # Robot specific information filled by the adapter
-        self._update_state(
-            {
-                "agv_position": order_state.state.agv_position,
-                "velocity": order_state.state.velocity,
-                "loads": order_state.state.loads,
-                "driving": order_state.state.driving,
-                "paused": order_state.state.paused,
-                "distance_since_last_node": order_state.state.distance_since_last_node,
-                "battery_state": order_state.state.battery_state,
-                "errors": current_errors + order_state.state.errors,
-                "informations": order_state.state.informations,
-                # adapter 的空字符串不是合法 VDA5050 operatingMode，保留 controller
-                # 当前值；如果当前值也非法，则由 _publish_state() 统一回退到 AUTOMATIC。
-                "operating_mode": order_state.state.operating_mode
-                if order_state.state.operating_mode in VALID_OPERATING_MODES
-                else self._current_state.operating_mode
-            }
-        )
+        state_update = {
+            "agv_position": order_state.state.agv_position,
+            "velocity": order_state.state.velocity,
+            "loads": order_state.state.loads,
+            "driving": order_state.state.driving,
+            "paused": order_state.state.paused,
+            "distance_since_last_node": order_state.state.distance_since_last_node,
+            "battery_state": order_state.state.battery_state,
+            "errors": current_errors + order_state.state.errors,
+            "informations": order_state.state.informations,
+            # adapter 的空字符串不是合法 VDA5050 operatingMode，保留 controller
+            # 当前值；如果当前值也非法，则由 _publish_state() 统一回退到 AUTOMATIC。
+            "operating_mode": order_state.state.operating_mode
+            if order_state.state.operating_mode in VALID_OPERATING_MODES
+            else self._current_state.operating_mode
+        }
+        if not self._has_current_order() and order_state.state.last_node_id:
+            # 空闲时以底盘最近地图点同步 lastNode，活动订单仍由订单序号推进。
+            state_update["last_node_id"] = order_state.state.last_node_id
+        self._update_state(state_update)
 
     # Instant Actions
 
