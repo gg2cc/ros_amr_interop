@@ -434,7 +434,8 @@ class MQTTBridge(Node):
         """MQTT client message callback."""
         try:
             msg_json = json_camel_to_snake_case(msg.payload)
-            self.logger.info(f"Received '{msg_json}' from '{msg.topic}' topic")
+            payload_json = json.dumps(msg_json, ensure_ascii=False)
+            self.logger.info(f"Received '{payload_json}' from '{msg.topic}' topic")
         except json.decoder.JSONDecodeError:
             self.logger.error(f"Failed to decode message: '{msg.payload}'")
             return

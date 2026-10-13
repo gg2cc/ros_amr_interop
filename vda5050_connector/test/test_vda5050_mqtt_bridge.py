@@ -631,6 +631,23 @@ def test_vda5050_mqtt_bridge_publishes_factsheet_with_qos_zero(
     )
 
 
+def test_vda5050_mqtt_bridge_logs_received_payload_as_json(
+    setup_rclpy, mocker, mock_mqtt_client
+):
+    mqtt_bridge = MQTTBridge()
+    logger = MagicMock()
+    mocker.patch.object(mqtt_bridge, "logger", logger)
+    mocker.patch.object(mqtt_bridge, "_order_pub", MagicMock())
+
+    mqtt_message = MQTTMessage(topic=b"foo/bar/order")
+    mqtt_message.payload = json.dumps(get_order()).encode()
+    mqtt_bridge.on_message_mqtt(mqtt_bridge.mqtt_client, ..., mqtt_message)
+
+    received_message = logger.info.call_args_list[0].args[0]
+    assert '"node_id": "node1"' in received_message
+    assert "'node_id': 'node1'" not in received_message
+
+
 @pytest.mark.parametrize(
     "malformed_msg",
     [
