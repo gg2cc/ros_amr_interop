@@ -446,8 +446,11 @@ def test_failed_navigation_extension_is_reported_as_information_only():
 
 def test_navigation_callbacks_capture_order_generation():
     action_client = MagicMock()
+    start_node = Node(node_id="P1", sequence_id=0)
+    target_node = Node(node_id="P2", sequence_id=2)
     controller = SimpleNamespace(
         _navigate_through_nodes_act_cli=action_client,
+        _current_order=Order(nodes=[start_node, target_node]),
         _order_generation=7,
         _nav_through_nodes_goal_lock=threading.Lock(),
         _nav_through_nodes_goal_pending=False,
@@ -464,9 +467,19 @@ def test_navigation_callbacks_capture_order_generation():
 
     VDA5050Controller.send_adapter_navigate_through_nodes(
         controller,
-        edges=[Edge(edge_id="edge-1", sequence_id=1)],
-        nodes=[Node(node_id="P2", sequence_id=2)],
+        edges=[Edge(
+            edge_id="edge-1",
+            sequence_id=1,
+            start_node_id="P1",
+            end_node_id="P2",
+        )],
+        nodes=[target_node],
     )
+
+    sent_goal = action_client.send_goal_async.call_args.args[0]
+    assert sent_goal.nodes == [start_node, target_node]
+    assert controller._current_node_goal == target_node
+    assert controller._nav_through_nodes_last_seq == target_node.sequence_id
 
     feedback_callback = action_client.send_goal_async.call_args.kwargs[
         "feedback_callback"
@@ -483,6 +496,10 @@ def test_duplicate_navigation_dispatch_is_reserved_before_waiting_for_server():
         _nav_through_nodes_goal_order_generation=None,
         _navigate_through_nodes_goal_handle=None,
         _order_generation=3,
+        _current_order=Order(nodes=[
+            Node(node_id="P1", sequence_id=0),
+            Node(node_id="P2", sequence_id=2),
+        ]),
         _current_node_goal=None,
         _nav_through_nodes_last_seq=0,
         _navigate_through_nodes_feedback_callback=MagicMock(),
@@ -493,7 +510,12 @@ def test_duplicate_navigation_dispatch_is_reserved_before_waiting_for_server():
     controller._navigate_through_nodes_act_cli = action_client
     send_goal_future = SimpleNamespace(add_done_callback=MagicMock())
     action_client.send_goal_async.return_value = send_goal_future
-    edges = [Edge(edge_id="edge-1", sequence_id=1)]
+    edges = [Edge(
+        edge_id="edge-1",
+        sequence_id=1,
+        start_node_id="P1",
+        end_node_id="P2",
+    )]
     nodes = [Node(node_id="P2", sequence_id=2)]
 
     def dispatch_again_while_waiting():

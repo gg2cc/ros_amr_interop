@@ -2382,7 +2382,47 @@ class VDA5050Controller(Node):
         # Create goal message with edge and node parameters
         goal_msg = NavigateThroughNodes.Goal()
         goal_msg.edges = edges
-        goal_msg.nodes = nodes
+
+        # VDA5050 action 需要完整的 Node-Edge-Node 拓扑；drivable segment 只返回各 Edge 的目标 Node。
+        # 按首条 Edge 的序号从当前订单补回起点 Node，供 adapter 构造首段几何。
+        action_nodes = list(nodes)
+        target_nodes = nodes
+        if edges and nodes:
+            first_edge = edges[0]
+            already_has_start_node = (
+                nodes[0].node_id == first_edge.start_node_id
+                and nodes[0].sequence_id + 1 == first_edge.sequence_id
+            )
+            if already_has_start_node:
+                target_nodes = nodes[1:]
+            else:
+                start_sequence_id = first_edge.sequence_id - 1
+                start_node = next(
+                    (
+                        node for node in self._current_order.nodes
+                        if node.sequence_id == start_sequence_id
+                        and node.node_id == first_edge.start_node_id
+                    ),
+                    None,
+                )
+                if start_node is None:
+                    self._current_node_goal = nodes[0]
+                    self.logger.error(
+                        "Cannot build NavigateThroughNodes goal: start node "
+                        f"'{first_edge.start_node_id}' at sequence {start_sequence_id} "
+                        "is missing from the active order."
+                    )
+                    self._handle_navigation_failure()
+                    return
+                action_nodes.insert(0, start_node)
+
+        if not target_nodes:
+            self.logger.error("Cannot send NavigateThroughNodes goal without a target node.")
+            self._handle_navigation_failure()
+            return
+
+        # 起点只用于描述几何拓扑；订单进度和完成序号仍从首个目标 Node 开始计算。
+        goal_msg.nodes = action_nodes
 
         # 在等待 action server 前预留唯一派发权，防止并发 timer 重复发送 goal。
         with self._nav_through_nodes_goal_lock:
@@ -2396,15 +2436,15 @@ class VDA5050Controller(Node):
                 return
 
             order_generation = self._order_generation
-            self._current_node_goal = nodes[0]
-            self._nav_through_nodes_last_seq = nodes[-1].sequence_id
+            self._current_node_goal = target_nodes[0]
+            self._nav_through_nodes_last_seq = target_nodes[-1].sequence_id
             self._nav_through_nodes_goal_pending = True
             self._nav_through_nodes_goal_order_generation = order_generation
 
         try:
             self._navigate_through_nodes_act_cli.wait_for_server()
             self.logger.info(
-                f"Navigate through nodes goal request sent with {len(nodes)} nodes"
+                f"Navigate through nodes goal request sent with {len(action_nodes)} nodes"
                 f" and {len(edges)} edges.")
             send_goal_future = self._navigate_through_nodes_act_cli.send_goal_async(
                 goal_msg,
